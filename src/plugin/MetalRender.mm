@@ -1,0 +1,164 @@
+#import <Metal/Metal.h>
+#include "MetalRender.h"
+#include <mutex>
+
+namespace cm {
+namespace {
+constexpr const char *shader = R"METAL(
+#include <metal_stdlib>
+using namespace metal;
+struct Params {
+  float4 hue, sat, neutral;
+  float stops, hueAmount, satAmount, exposureAmount;
+  float neutralAmount;
+  int srcX, srcY, srcW, srcH;
+  int dstX, dstY, dstW, dstH;
+  int winX, winY, winW, winH;
+  int srcRowFloats, dstRowFloats;
+  int srcComponents, dstComponents;
+  int srcPremult, dstPremult;
+  int exactCopy;
+};
+float3 decodeDI(float3 x) {
+  return select(exp2(x / .07329248f - 7.f) - .0075f,
+                x / 10.44426855f, x <= .02740668f);
+}
+float3 encodeDI(float3 x) {
+  return select((log2(x + .0075f) + 7.f) * .07329248f,
+                x * 10.44426855f, x <= .00262409f);
+}
+float luma(float3 x) { return dot(x, float3(.27411851f, .87363190f, -.1477249265f)); }
+float3 toLab(float3 x) {
+  float3 xyz = float3(dot(x, float3(.70062239f,.14877482f,.10105872f)),
+                      dot(x, float3(.27411851f,.87363190f,-.14775041f)),
+                      dot(x, float3(-.09896291f,-.13789533f,1.32591599f)));
+  float3 l = float3(dot(xyz,float3(.8189330101f,.3618667424f,-.1288597137f)),
+                    dot(xyz,float3(.0329845436f,.9293118715f,.0361456387f)),
+                    dot(xyz,float3(.0482003018f,.2643662691f,.6338517070f)));
+  l = sign(l) * pow(abs(l), float3(1.f/3.f));
+  return float3(dot(l,float3(.2104542553f,.7936177850f,-.0040720468f)),
+                dot(l,float3(1.9779984951f,-2.4285922050f,.4505937099f)),
+                dot(l,float3(.0259040371f,.7827717662f,-.8086757660f)));
+}
+float3 fromLab(float3 v) {
+  float3 l = float3(dot(v,float3(1.f,.396337777376175f,.215803757309914f)),
+                    dot(v,float3(1.f,-.105561345815659f,-.063854172825813f)),
+                    dot(v,float3(1.f,-.089484177529812f,-1.291485548019410f)));
+  l = l*l*l;
+  float3 xyz = float3(dot(l,float3(1.227013851103521f,-.557799980651822f,.281256148966468f)),
+                      dot(l,float3(-.040580178423281f,1.112256869616830f,-.071676678665601f)),
+                      dot(l,float3(-.076381284505707f,-.421481978418013f,1.586163220440795f)));
+  return float3(dot(xyz,float3(1.51667204f,-.28147805f,-.14696363f)),
+                dot(xyz,float3(-.46491710f,1.25142378f,.17488461f)),
+                dot(xyz,float3(.06484905f,.10913934f,.76141462f)));
+}
+float3 match(float3 input, constant Params &p) {
+  if (!all(isfinite(input))) return input;
+  float3 x = decodeDI(input);
+  float y = luma(x);
+  if (p.neutralAmount > 0.f && y > 1e-7f) {
+    float3 z = x * exp(p.neutral.xyz * clamp(p.neutralAmount,0.f,1.f));
+    float zy = luma(z);
+    if (zy > 1e-7f && all(isfinite(z))) x = z * (y / zy);
+  }
+  if ((p.hueAmount > 0.f || p.satAmount > 0.f) && y > 1e-6f) {
+    float3 l = toLab(x);
+    float c = length(l.yz);
+    if (l.x > 1e-5f && c / l.x > .005f) {
+      float h = atan2(l.z,l.y);
+      float dh = p.hue.x + p.hue.y*sin(h) + p.hue.z*cos(h);
+      float ds = p.sat.x + p.sat.y*sin(h) + p.sat.z*cos(h);
+      float h2 = h + clamp(p.hueAmount,0.f,1.f)*clamp(dh,-.5235987756f,.5235987756f);
+      float c2 = c * exp(clamp(p.satAmount,0.f,1.f)*clamp(ds,-.6931471806f,.6931471806f));
+      float3 z = fromLab(float3(l.x,c2*cos(h2),c2*sin(h2)));
+      float zy = luma(z);
+      if (all(isfinite(z)) && zy > 1e-6f) {
+        z *= y / zy;
+        if (max(max(abs(z.x),abs(z.y)),abs(z.z)) < 100.f) x = z;
+      }
+    }
+  }
+  if (p.exposureAmount > 0.f) x *= exp2(clamp(p.exposureAmount,0.f,1.f)*p.stops);
+  float3 out = encodeDI(x);
+  return all(isfinite(out)) ? out : input;
+}
+kernel void cameraMatch(device const float *src [[buffer(0)]],
+                        device float *dst [[buffer(1)]],
+                        constant Params &p [[buffer(2)]],
+                        uint2 tid [[thread_position_in_grid]]) {
+  if (tid.x >= uint(p.winW) || tid.y >= uint(p.winH)) return;
+  int x = p.winX + int(tid.x), y = p.winY + int(tid.y);
+  if (x < p.dstX || y < p.dstY || x >= p.dstX+p.dstW || y >= p.dstY+p.dstH) return;
+  int di = (y-p.dstY)*p.dstRowFloats + (x-p.dstX)*p.dstComponents;
+  if (x < p.srcX || y < p.srcY || x >= p.srcX+p.srcW || y >= p.srcY+p.srcH) {
+    for (int k=0;k<p.dstComponents;k++) dst[di+k]=0.f;
+    return;
+  }
+  int si = (y-p.srcY)*p.srcRowFloats + (x-p.srcX)*p.srcComponents;
+  if (p.exactCopy) {
+    for (int k=0;k<p.dstComponents;k++) dst[di+k]=src[si+k];
+    return;
+  }
+  float alpha = p.srcComponents == 4 ? src[si+3] : 1.f;
+  float3 rgb = float3(src[si],src[si+1],src[si+2]);
+  if (p.srcPremult && alpha > 1e-6f) rgb /= alpha;
+  float3 out = match(rgb,p);
+  if (p.dstPremult) out *= alpha;
+  dst[di]=out.x; dst[di+1]=out.y; dst[di+2]=out.z;
+  if (p.dstComponents == 4) dst[di+3]=alpha;
+}
+)METAL";
+
+std::mutex pipelineMutex;
+id<MTLDevice> pipelineDevice = nil;
+id<MTLComputePipelineState> pipeline = nil;
+}
+
+bool renderMetal(void *queuePtr, void *source, void *output,
+                 const MetalParams &p) {
+  @autoreleasepool {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLBuffer> src = (__bridge id<MTLBuffer>)source;
+    id<MTLBuffer> dst = (__bridge id<MTLBuffer>)output;
+    if (!queue || !src || !dst || p.winW <= 0 || p.winH <= 0 ||
+        p.srcRowFloats <= 0 || p.dstRowFloats <= 0)
+      return false;
+    id<MTLComputePipelineState> current;
+    {
+      std::lock_guard<std::mutex> lock(pipelineMutex);
+      if (!pipeline || pipelineDevice != queue.device) {
+        NSError *error = nil;
+        id<MTLLibrary> library = [queue.device newLibraryWithSource:
+            [NSString stringWithUTF8String:shader] options:nil error:&error];
+        if (!library) {
+          NSLog(@"Camera Match Metal library: %@", error);
+          return false;
+        }
+        id<MTLFunction> function = [library newFunctionWithName:@"cameraMatch"];
+        pipeline = [queue.device newComputePipelineStateWithFunction:function
+                                                               error:&error];
+        if (!pipeline) {
+          NSLog(@"Camera Match Metal pipeline: %@", error);
+          return false;
+        }
+        pipelineDevice = queue.device;
+      }
+      current = pipeline;
+    }
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    if (!command || !encoder) return false;
+    [encoder setComputePipelineState:current];
+    [encoder setBuffer:src offset:0 atIndex:0];
+    [encoder setBuffer:dst offset:0 atIndex:1];
+    [encoder setBytes:&p length:sizeof(p) atIndex:2];
+    NSUInteger width = current.threadExecutionWidth;
+    NSUInteger height = std::max<NSUInteger>(1, current.maxTotalThreadsPerThreadgroup / width);
+    [encoder dispatchThreads:MTLSizeMake(p.winW,p.winH,1)
+      threadsPerThreadgroup:MTLSizeMake(width,height,1)];
+    [encoder endEncoding];
+    [command commit];
+    return true;
+  }
+}
+} // namespace cm
