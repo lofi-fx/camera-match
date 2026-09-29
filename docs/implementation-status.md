@@ -7,7 +7,7 @@
 - Separate full-size ColorChecker Video and Passport Video color-target layouts. No published patch RGB target values are used.
 - Metal float-buffer rendering with a CPU fallback, Source sampling with median luminance outlier rejection, alpha handling, captured snapshots, checksum-validated project payload, hero revision/fingerprint, and frozen match coefficients.
 - Independent hue, saturation, exposure, and neutral controls. Chromatic stages preserve scene-linear DWG luminance in the tested domain.
-- Explicit Capture Hero, Apply Hero to This Clip, refit, status, selected-patch report, and bypass controls. Capture publishes the latest hero to a session handoff; Apply copies it into the target node's persistent payload before rendering. A saved hero can be republished after Resolve restarts.
+- Explicit Capture Hero, Apply Hero to This Clip, refit, status, selected-patch report, and bypass controls. Capture registers a uniquely named hero for the session; Apply selects by name and copies it into the target node's persistent payload before rendering. Saved heroes can be registered again after Resolve restarts.
 - New nodes default to the Passport Video chart model. Chart corner coordinates are hidden from the inspector; patch and sample controls are grouped in a collapsed Advanced section.
 
 ## Automated verification
@@ -16,7 +16,7 @@
 
 ## Resolve verification: partial
 
-The system installation under `/Library/OFX/Plugins` appeared in Resolve's LoFi FX group. The user reported that the overlay did not appear and the CPU effect was very slow. The new version advertises Metal rendering and registers both DrawSuite V2 and legacy OpenGL V1 overlay entries. These fixes have not yet been exercised in Resolve. Other **unverified** areas are viewer drawing/drag at multiple zooms and proxies; parameter edit grouping and undo/redo; Source image fetch from `InstanceChanged`; hidden string payload length/copy/reopen; alpha behavior in a Resolve render; color management negotiation; export parity; physical chart patch alignment; real-footage match quality. See [host-test-checklist.md](host-test-checklist.md).
+The system installation under `/Library/OFX/Plugins` appeared in Resolve's LoFi FX group. The user reported that the overlay disappears after capture/apply even though Show overlay remains checked; the previous redraw change did not resolve it. The next build registers one overlay API path per host, tracks each viewer interaction for redraw, and logs lifecycle and draw outcomes to Resolve's debug log. This specific host fix remains unverified. The current build advertises Metal rendering. Other **unverified** areas are viewer drawing/drag at multiple zooms and proxies; parameter edit grouping and undo/redo; Source image fetch from `InstanceChanged`; hidden string payload length/copy/reopen; alpha behavior in a Resolve render; color management negotiation; export parity; physical chart patch alignment; real-footage match quality. See [host-test-checklist.md](host-test-checklist.md).
 
 ## Known limits
 
@@ -24,5 +24,5 @@ The system installation under `/Library/OFX/Plugins` appeared in Resolve's LoFi 
 - Manual DWG/Intermediate input contract only. A mismatched upstream color space is not automatically detected.
 - The patch-quality flags currently mark too few pixels and high luminance dispersion; gradient and clipping diagnostics need real-footage tuning.
 - Uses a single exposure gain, not a tone response curve. The color fit can fall back to neutral/exposure-only when chromatic coverage is insufficient.
-- The latest-hero handoff lasts only for the current Resolve process. Fresh nodes after a restart need **Use This Hero for Other Clips** on a saved hero node. Rendering reads the saved node payload and does not depend on the handoff.
-- No automatic chart detection, chart tracking, downstream geometric inversion, interlaced-field capture, GPU rendering, or per-camera reference registry.
+- The named-hero registry lasts only for the current Resolve process. Fresh nodes after a restart need **Use This Hero for Other Clips** on each relevant saved hero node. Rendering reads the saved node payload and does not depend on the registry.
+- No automatic chart detection, chart tracking, downstream geometric inversion, interlaced-field capture, CUDA rendering, or project-wide persistent reference registry.

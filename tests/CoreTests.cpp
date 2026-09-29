@@ -37,7 +37,7 @@ int main() {
   first.patch[0].rgb = {.2, .3, .4};
   transfer.publish(first);
   first.name = "Changed locally";
-  auto shared = transfer.latest();
+  auto shared = transfer.find("Hero A");
   assert(shared && shared->name == "Hero A");
   Persistent received;
   received.hasHero = true;
@@ -45,7 +45,16 @@ int main() {
   Capture second;
   second.name = "Hero B";
   transfer.publish(second);
-  assert(received.hero.name == "Hero A" && transfer.latest()->name == "Hero B");
+  assert(received.hero.name == "Hero A");
+  assert(transfer.find("Hero A")->revision == 7);
+  assert(transfer.find("Hero B")->name == "Hero B");
+  assert(!transfer.find("Hero C"));
+  assert((transfer.names() == std::vector<std::string>{"Hero A", "Hero B"}));
+  Capture alias = received.hero;
+  alias.name = "Scene 1";
+  transfer.publish(alias);
+  assert(transfer.find("Scene 1")->revision == 7);
+  assert(received.hero.name == "Hero A");
   Persistent restored;
   assert(deserialize(serialize(received), restored));
   assert(restored.hero.name == "Hero A" && restored.hero.revision == 7);

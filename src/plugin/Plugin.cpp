@@ -16,8 +16,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
+#include <cstdint>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -44,7 +48,34 @@ thread_local std::unordered_map<std::string, OfxPropertySetHandle>
     descriptorParams;
 struct Instance {
   std::atomic_bool changing{false};
+  std::atomic<uint64_t> overlayRevision{0};
+  std::mutex overlayMutex;
+  std::vector<OfxInteractHandle> overlays;
 };
+void registerOverlay(Instance *i, OfxInteractHandle h) {
+  if (!i)
+    return;
+  std::lock_guard<std::mutex> lock(i->overlayMutex);
+  i->overlays.push_back(h);
+}
+void unregisterOverlay(Instance *i, OfxInteractHandle h) {
+  if (!i)
+    return;
+  std::lock_guard<std::mutex> lock(i->overlayMutex);
+  auto &v = i->overlays;
+  v.erase(std::remove(v.begin(), v.end(), h), v.end());
+}
+void redrawOverlays(Instance *i) {
+  if (!i || !interact)
+    return;
+  std::vector<OfxInteractHandle> handles;
+  {
+    std::lock_guard<std::mutex> lock(i->overlayMutex);
+    handles = i->overlays;
+  }
+  for (auto h : handles)
+    interact->interactRedraw(h);
+}
 struct EditGroup {
   OfxParamSetHandle ps;
   bool open;
@@ -64,6 +95,7 @@ struct ChangeScope {
 };
 struct Interact {
   OfxImageEffectHandle effect = nullptr;
+  uint64_t loggedRevision = UINT64_MAX;
   Point start{}, scale{1, 1};
   Geometry initial{}, last{};
   int kind = 0, index = -1, hover = -1;
@@ -208,10 +240,29 @@ bool commitState(OfxParamSetHandle ps, const Persistent &s) {
   return true;
 }
 void status(OfxParamSetHandle ps, const std::string &s) { ss(ps, "status", s); }
+std::string trimName(std::string name) {
+  auto nonspace = [](unsigned char c) { return !std::isspace(c); };
+  name.erase(name.begin(), std::find_if(name.begin(), name.end(), nonspace));
+  name.erase(std::find_if(name.rbegin(), name.rend(), nonspace).base(),
+             name.end());
+  return name;
+}
+std::string availableHeroes() {
+  auto names = sessionHero.names();
+  if (names.empty())
+    return "No heroes registered this session";
+  std::string result = "Available heroes: ";
+  for (size_t j = 0; j < names.size(); ++j) {
+    if (j)
+      result += ", ";
+    result += names[j];
+  }
+  return result;
+}
 void referenceStatus(OfxParamSetHandle ps, const Persistent &s) {
   if (!s.hasHero) {
     ss(ps, "referenceStatus",
-       "No hero on this node. Apply Hero uses the latest captured hero.");
+       "No hero on this node. Enter Apply hero named, then Apply Hero.");
     return;
   }
   int count = 0;
@@ -600,24 +651,25 @@ void handle(OfxDrawContextHandle d, Point p, Point s, const OfxRGBAColourF &c) {
                           {p.x - 4 * s.x, p.y + 4 * s.y}}};
   loop(d, b, c);
 }
-void drawOverlay(Interact *i, OfxPropertySetHandle args) {
+enum class OverlayResult { Drawn, Hidden, NoContext, InvalidGeometry };
+OverlayResult drawOverlay(Interact *i, OfxPropertySetHandle args) {
   if (!i || !gi(paramSet(i->effect), "showOverlay", 1))
-    return;
+    return OverlayResult::Hidden;
   void *p = nullptr;
   prop->propGetPointer(args, kOfxInteractPropDrawContext, 0, &p);
   auto d = static_cast<OfxDrawContextHandle>(p);
 #ifndef __APPLE__
   if (!d || !draw)
-    return;
+    return OverlayResult::NoContext;
 #else
   if (!d && !CGLGetCurrentContext())
-    return;
+    return OverlayResult::NoContext;
 #endif
   auto ps = paramSet(i->effect);
   auto g = geometry(ps);
   auto h = makeHomography(g);
   if (!h.valid)
-    return;
+    return OverlayResult::InvalidGeometry;
 #ifdef __APPLE__
   if (!d)
     glPushAttrib(GL_ENABLE_BIT | GL_LINE_BIT | GL_CURRENT_BIT);
@@ -680,6 +732,7 @@ void drawOverlay(Interact *i, OfxPropertySetHandle args) {
   if (!d)
     glPopAttrib();
 #endif
+  return OverlayResult::Drawn;
 }
 void refreshSelected(OfxParamSetHandle ps, const Geometry &g, int j) {
   if (j < 0 || j >= int(layout(g.model).size()))
@@ -705,10 +758,10 @@ OfxStatus overlayMain(const char *action, const void *handle,
       OfxPropertySetHandle p = nullptr;
       interact->interactGetPropertySet(h, &p);
       const char *slaves[] = {"corner0",  "corner1",      "corner2",
-                              "corner3",  geoPayload,     "chartModel",
-                              "rotation", "mirror",       "showOverlay",
-                              "editMode", "patchSelector"};
-      for (int j = 0; j < 11; j++)
+                              "corner3",  geoPayload,     payload,
+                              "chartModel", "rotation",   "mirror",
+                              "showOverlay", "editMode", "patchSelector"};
+      for (int j = 0; j < 12; j++)
         prop->propSetString(p, kOfxInteractPropSlaveToParam, j, slaves[j]);
       return kOfxStatOK;
     }
@@ -720,6 +773,8 @@ OfxStatus overlayMain(const char *action, const void *handle,
       prop->propGetPointer(p, kOfxPropEffectInstance, 0, &e);
       i->effect = (OfxImageEffectHandle)e;
       putInteract(h, i);
+      registerOverlay(instance(i->effect), h);
+      std::fprintf(stderr, "CameraMatch overlay instance created\n");
       return kOfxStatOK;
     }
     auto *i = getInteract(h);
@@ -728,12 +783,23 @@ OfxStatus overlayMain(const char *action, const void *handle,
       return kOfxStatReplyDefault;
     if (!strcmp(action, kOfxActionDestroyInstance)) {
       finish(i, false);
+      unregisterOverlay(instance(i->effect), h);
+      std::fprintf(stderr, "CameraMatch overlay instance destroyed\n");
       putInteract(h, nullptr);
       delete i;
       return kOfxStatOK;
     }
     if (!strcmp(action, kOfxInteractActionDraw)) {
-      drawOverlay(i, args);
+      auto result = drawOverlay(i, args);
+      if (auto *effectInstance = instance(i->effect)) {
+        uint64_t revision = effectInstance->overlayRevision.load();
+        if (i->loggedRevision != revision) {
+          std::fprintf(stderr,
+                       "CameraMatch overlay draw revision=%llu result=%d\n",
+                       static_cast<unsigned long long>(revision), int(result));
+          i->loggedRevision = revision;
+        }
+      }
       return kOfxStatOK;
     }
     if (!strcmp(action, kOfxInteractActionLoseFocus)) {
@@ -912,29 +978,77 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
   ChangeScope changeScope{inst};
   auto done = [&]() {
     inst->changing = false;
+    inst->overlayRevision.fetch_add(1);
+    if (name == "captureHero" || name == "analyze" ||
+        name == "showOverlay") {
+      std::lock_guard<std::mutex> lock(inst->overlayMutex);
+      std::fprintf(stderr, "CameraMatch parameter %s: %zu overlays active\n",
+                   name.c_str(), inst->overlays.size());
+    }
+    redrawOverlays(inst);
     return kOfxStatOK;
   };
+  if (name == "listHeroes") {
+    status(ps, availableHeroes());
+    return done();
+  }
   if (name == "makeHeroAvailable") {
     Persistent s = state(ps);
     if (!s.hasHero) {
       status(ps, "Capture Hero on this node first");
+    } else if (trimName(s.hero.name).empty() &&
+               trimName(gs(ps, "heroName")).empty()) {
+      status(ps, "Enter a unique name in Capture hero as to register this hero");
     } else {
-      sessionHero.publish(s.hero);
-      status(ps, "Hero ready for other clips: " + s.hero.name);
+      Capture registered = s.hero;
+      std::string alias = trimName(gs(ps, "heroName"));
+      if (!alias.empty())
+        registered.name = alias;
+      auto existing = sessionHero.find(registered.name);
+      if (existing && fingerprint(*existing) != fingerprint(registered))
+        status(ps, "Hero name already registered for another capture: " +
+                       registered.name);
+      else {
+        sessionHero.publish(registered);
+        status(ps, "Hero ready for other clips: " + registered.name);
+      }
     }
     return done();
   }
   if (name == "captureHero" || name == "analyze") {
     Persistent s = state(ps);
-    if (name == "analyze" && !s.hasHero) {
-      auto latest = sessionHero.latest();
-      if (!latest) {
-        status(ps, "No hero available. Capture Hero first, or copy a saved "
-                   "hero node.");
+    if (name == "captureHero") {
+      std::string requested = trimName(gs(ps, "heroName"));
+      if (requested.empty()) {
+        status(ps, "Enter a unique Hero name, such as Scene 1");
         return done();
       }
-      s.hero = *latest;
-      s.hasHero = true;
+      auto existing = sessionHero.find(requested);
+      Capture previous = s.hero;
+      previous.name = requested;
+      if (existing &&
+          (s.hasTarget || !s.hasHero ||
+           fingerprint(*existing) != fingerprint(previous))) {
+        status(ps, "Hero name already registered. Use a unique scene name: " +
+                       requested);
+        return done();
+      }
+    } else {
+      std::string requested = trimName(gs(ps, "heroToApply"));
+      if (!requested.empty()) {
+        auto selected = sessionHero.find(requested);
+        if (selected) {
+          s.hero = *selected;
+          s.hasHero = true;
+        } else if (!s.hasHero || s.hero.name != requested) {
+          status(ps, "Hero '" + requested + "' not found. " +
+                         availableHeroes());
+          return done();
+        }
+      } else if (!s.hasHero) {
+        status(ps, "Enter Apply hero named. " + availableHeroes());
+        return done();
+      }
     }
     Geometry g = geometry(ps);
     if (name == "analyze" && s.hero.chartModel != g.model) {
@@ -950,7 +1064,7 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     }
     std::string resultStatus;
     if (name == "captureHero") {
-      c.name = gs(ps, "heroName");
+      c.name = trimName(gs(ps, "heroName"));
       c.revision = s.hasHero ? s.hero.revision + 1 : 1;
       s.hero = c;
       s.hasHero = true;
@@ -1132,13 +1246,11 @@ OfxStatus describe(OfxImageEffectHandle e) {
 #endif
   prop->propSetInt(p, kOfxImageEffectPropSupportsOverlays, 0,
                    interact ? 1 : 0);
-  if (interact) {
-    if (draw)
-      prop->propSetPointer(p, kOfxImageEffectPluginPropOverlayInteractV2, 0,
-                           (void *)overlayMain);
-    prop->propSetPointer(p, kOfxImageEffectPluginPropOverlayInteractV1, 0,
-                         (void *)overlayMain);
-  }
+  if (interact)
+    prop->propSetPointer(
+        p, draw ? kOfxImageEffectPluginPropOverlayInteractV2
+                : kOfxImageEffectPluginPropOverlayInteractV1,
+        0, (void *)overlayMain);
   return kOfxStatOK;
 }
 OfxStatus describeContext(OfxImageEffectHandle e) {
@@ -1158,11 +1270,15 @@ OfxStatus describeContext(OfxImageEffectHandle e) {
   choice(ps, "chartModel", "Chart model",
          {"ColorChecker Video", "Color Checker Passport Video"});
   prop->propSetInt(desc(ps, "chartModel"), kOfxParamPropDefault, 0, 1);
-  define(ps, kOfxParamTypeString, "heroName", "Hero name");
+  define(ps, kOfxParamTypeString, "heroName", "Capture hero as");
   prop->propSetString(desc(ps, "heroName"), kOfxParamPropDefault, 0,
-                      "Hero camera");
+                      "");
   define(ps, kOfxParamTypePushButton, "captureHero", "Capture Hero");
+  define(ps, kOfxParamTypeString, "heroToApply", "Apply hero named");
+  prop->propSetString(desc(ps, "heroToApply"), kOfxParamPropDefault, 0,
+                      "");
   define(ps, kOfxParamTypePushButton, "analyze", "Apply Hero to This Clip");
+  define(ps, kOfxParamTypePushButton, "listHeroes", "List Captured Heroes");
   define(ps, kOfxParamTypePushButton, "makeHeroAvailable",
          "Use This Hero for Other Clips");
   define(ps, kOfxParamTypeBoolean, "showOverlay", "Show overlay");
@@ -1245,7 +1361,7 @@ OfxStatus describeContext(OfxImageEffectHandle e) {
   define(ps, kOfxParamTypeString, "referenceStatus", "Reference status");
   prop->propSetString(
       desc(ps, "referenceStatus"), kOfxParamPropDefault, 0,
-      "No hero on this node. Apply Hero uses the latest captured hero.");
+      "No hero on this node. Enter Apply hero named, then Apply Hero.");
   prop->propSetInt(desc(ps, "referenceStatus"), kOfxParamPropEnabled, 0, 0);
   define(ps, kOfxParamTypeString, "patchReport", "Selected patch report");
   parent(ps, "patchReport", "advanced");
@@ -1255,7 +1371,7 @@ OfxStatus describeContext(OfxImageEffectHandle e) {
   define(ps, kOfxParamTypeString, "status", "Status");
   prop->propSetString(
       desc(ps, "status"), kOfxParamPropDefault, 0,
-      "Align a chart, then Capture Hero or Apply Hero to This Clip");
+      "Name and capture a hero, or enter its name and apply it to this clip");
   prop->propSetInt(desc(ps, "status"), kOfxParamPropEnabled, 0, 0);
   define(ps, kOfxParamTypeString, payload, "Captured match data");
   prop->propSetInt(desc(ps, payload), kOfxParamPropSecret, 0, 1);
@@ -1321,7 +1437,7 @@ OfxStatus mainEntry(const char *action, const void *handle,
   }
 }
 void setHost(OfxHost *h) { host = h; }
-OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 4, setHost, mainEntry};
+OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 6, setHost, mainEntry};
 } // namespace
 extern "C" {
 OfxExport int OfxGetNumberOfPlugins() { return 1; }
