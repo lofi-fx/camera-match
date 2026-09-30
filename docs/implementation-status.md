@@ -5,9 +5,9 @@
 - Native OFX filter and arm64 macOS bundle; one Source and one Output.
 - OpenGL V1 viewer overlay on macOS with four-corner projective alignment, patch outlines, sample regions, three edit modes, inspector equivalents, orientation/mirror controls, and parameter edit grouping.
 - Separate full-size ColorChecker Video and Passport Video color-target layouts. No published patch RGB target values are used.
-- Metal float-buffer rendering with a CPU fallback, Source sampling with median luminance outlier rejection, alpha handling, captured snapshots, checksum-validated project payload, hero revision/fingerprint, and frozen match coefficients.
+- Metal float-buffer rendering with a CPU fallback, Source sampling with median luminance outlier rejection, alpha handling, captured snapshots, checksum-validated project payload, reference revision/fingerprint, and frozen match coefficients.
 - Independent hue, saturation, exposure, and neutral controls. Chromatic stages preserve scene-linear DWG luminance in the tested domain.
-- Explicit Capture Hero, Apply Hero to This Clip, refit, status, selected-patch report, and bypass controls. Capture registers a uniquely named hero for the session; Apply selects by name and copies it into the target node's persistent payload before rendering. Saved heroes can be registered again after Resolve restarts.
+- Explicit Capture reference, Apply reference to this clip, refit, status, selected-patch report, and bypass controls. Capture registers a uniquely named reference for the session; Apply selects by name and copies it into the target node's persistent payload before rendering. Saved references can be registered again after Resolve restarts.
 - New nodes default to the Passport Video chart model. Chart corner coordinates are hidden from the inspector; patch and sample controls are grouped in a collapsed Advanced section.
 
 ## Automated verification
@@ -16,7 +16,7 @@
 
 ## Resolve verification: partial
 
-The system installation under `/Library/OFX/Plugins` appeared in Resolve's LoFi FX group. In the installed 0.6.0 build, Resolve created overlay interact instances after project reload but did not send Draw actions when Show overlay was toggled. The 0.7.0 build subscribes each interact instance to its parameters, selects OpenGL V1 drawing on macOS, and logs redraw request results. This host behavior remains unverified in the new build. The current build advertises Metal rendering. Other **unverified** areas are viewer drawing/drag at multiple zooms and proxies; parameter edit grouping and undo/redo; Source image fetch from `InstanceChanged`; hidden string payload length/copy/reopen; alpha behavior in a Resolve render; color management negotiation; export parity; physical chart patch alignment; real-footage match quality. See [host-test-checklist.md](host-test-checklist.md).
+The system installation under `/Library/OFX/Plugins` appeared in Resolve's LoFi FX group. After project reload, Resolve created overlay interact instances but did not send Draw actions while the viewer's Open FX Overlay mode was inactive. The user confirmed that selecting Open FX Overlay restored the guides without removing the effect. The plugin selects OpenGL V1 drawing on macOS and logs redraw request results. The 0.9.0 inspector grouping and prefilled reference names still need direct host verification. Other **unverified** areas are viewer drawing/drag at multiple zooms and proxies; parameter edit grouping and undo/redo; Source image fetch from `InstanceChanged`; hidden string payload length/copy/reopen; alpha behavior in a Resolve render; color management negotiation; export parity; physical chart patch alignment; real-footage match quality. See [host-test-checklist.md](host-test-checklist.md).
 
 ## Known limits
 
@@ -24,5 +24,5 @@ The system installation under `/Library/OFX/Plugins` appeared in Resolve's LoFi 
 - Manual DWG/Intermediate input contract only. A mismatched upstream color space is not automatically detected.
 - The patch-quality flags currently mark too few pixels and high luminance dispersion; gradient and clipping diagnostics need real-footage tuning.
 - Uses a single exposure gain, not a tone response curve. The color fit can fall back to neutral/exposure-only when chromatic coverage is insufficient.
-- The named-hero registry lasts only for the current Resolve process. Fresh nodes after a restart need **Use This Hero for Other Clips** on each relevant saved hero node. Rendering reads the saved node payload and does not depend on the registry.
+- The named-reference registry lasts only for the current Resolve process. Fresh nodes after a restart need **Use this reference for other clips** on each relevant saved reference node. Rendering reads the saved node payload and does not depend on the registry.
 - No automatic chart detection, chart tracking, downstream geometric inversion, interlaced-field capture, CUDA rendering, or project-wide persistent reference registry.

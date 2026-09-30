@@ -49,6 +49,8 @@ constexpr const char *id = "com.lofifx.CameraMatch";
 constexpr const char *payload = "cameraMatchState";
 constexpr const char *geoPayload = "chartGeometry";
 HeroTransfer sessionHero;
+std::mutex referenceNameMutex;
+std::unordered_map<std::string, size_t> claimedReferenceNames;
 thread_local std::unordered_map<std::string, OfxPropertySetHandle>
     descriptorParams;
 struct Instance {
@@ -56,6 +58,7 @@ struct Instance {
   std::atomic<uint64_t> overlayRevision{0};
   std::mutex overlayMutex;
   std::vector<OfxInteractHandle> overlays;
+  std::string claimedReferenceName;
 };
 void registerOverlay(Instance *i, OfxInteractHandle h) {
   if (!i)
@@ -255,11 +258,35 @@ std::string trimName(std::string name) {
              name.end());
   return name;
 }
+void claimReferenceName(Instance *inst, const std::string &name) {
+  std::lock_guard<std::mutex> lock(referenceNameMutex);
+  if (inst->claimedReferenceName == name)
+    return;
+  if (!inst->claimedReferenceName.empty()) {
+    auto it = claimedReferenceNames.find(inst->claimedReferenceName);
+    if (it != claimedReferenceNames.end() && --it->second == 0)
+      claimedReferenceNames.erase(it);
+  }
+  inst->claimedReferenceName = name;
+  if (!name.empty())
+    ++claimedReferenceNames[name];
+}
+std::string suggestReferenceName(Instance *inst) {
+  std::lock_guard<std::mutex> lock(referenceNameMutex);
+  for (unsigned n = 1;; ++n) {
+    std::string name = "ref" + std::to_string(n);
+    if (!claimedReferenceNames.count(name) && !sessionHero.find(name)) {
+      claimedReferenceNames[name] = 1;
+      inst->claimedReferenceName = name;
+      return name;
+    }
+  }
+}
 std::string availableHeroes() {
   auto names = sessionHero.names();
   if (names.empty())
-    return "No heroes registered this session";
-  std::string result = "Available heroes: ";
+    return "No references captured this session";
+  std::string result = "Available references: ";
   for (size_t j = 0; j < names.size(); ++j) {
     if (j)
       result += ", ";
@@ -270,7 +297,7 @@ std::string availableHeroes() {
 void referenceStatus(OfxParamSetHandle ps, const Persistent &s) {
   if (!s.hasHero) {
     ss(ps, "referenceStatus",
-       "No hero on this node. Enter Apply hero named, then Apply Hero.");
+       "No reference on this node. Enter Apply reference named, then apply.");
     return;
   }
   int count = 0;
@@ -294,7 +321,7 @@ void patchReport(OfxParamSetHandle ps) {
   o << layout(model)[j].id;
   if (s.hasHero) {
     auto p = s.hero.patch[j];
-    o << " · hero " << p.valid << " pixels";
+    o << " · reference " << p.valid << " pixels";
   }
   if (s.hasTarget) {
     auto p = s.target.patch[j];
@@ -989,6 +1016,10 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     return kOfxStatOK;
   std::string name = n;
   auto ps = paramSet(e);
+  if (name == "heroName") {
+    claimReferenceName(inst, trimName(gs(ps, "heroName")));
+    return kOfxStatOK;
+  }
   inst->changing = true;
   ChangeScope changeScope{inst};
   auto done = [&]() {
@@ -1016,10 +1047,10 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
   if (name == "makeHeroAvailable") {
     Persistent s = state(ps);
     if (!s.hasHero) {
-      status(ps, "Capture Hero on this node first");
+      status(ps, "Capture a reference on this node first");
     } else if (trimName(s.hero.name).empty() &&
                trimName(gs(ps, "heroName")).empty()) {
-      status(ps, "Enter a unique name in Capture hero as to register this hero");
+      status(ps, "Enter a unique name in Save reference as to register it");
     } else {
       Capture registered = s.hero;
       std::string alias = trimName(gs(ps, "heroName"));
@@ -1027,11 +1058,11 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
         registered.name = alias;
       auto existing = sessionHero.find(registered.name);
       if (existing && fingerprint(*existing) != fingerprint(registered))
-        status(ps, "Hero name already registered for another capture: " +
+        status(ps, "Reference name already registered for another capture: " +
                        registered.name);
       else {
         sessionHero.publish(registered);
-        status(ps, "Hero ready for other clips: " + registered.name);
+        status(ps, "Reference ready for other clips: " + registered.name);
       }
     }
     return done();
@@ -1041,7 +1072,7 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     if (name == "captureHero") {
       std::string requested = trimName(gs(ps, "heroName"));
       if (requested.empty()) {
-        status(ps, "Enter a unique Hero name, such as Scene 1");
+        status(ps, "Enter a unique reference name, such as Scene 1");
         return done();
       }
       auto existing = sessionHero.find(requested);
@@ -1050,7 +1081,7 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       if (existing &&
           (s.hasTarget || !s.hasHero ||
            fingerprint(*existing) != fingerprint(previous))) {
-        status(ps, "Hero name already registered. Use a unique scene name: " +
+        status(ps, "Reference name already registered. Use a unique scene name: " +
                        requested);
         return done();
       }
@@ -1062,18 +1093,18 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
           s.hero = *selected;
           s.hasHero = true;
         } else if (!s.hasHero || s.hero.name != requested) {
-          status(ps, "Hero '" + requested + "' not found. " +
+          status(ps, "Reference '" + requested + "' not found. " +
                          availableHeroes());
           return done();
         }
       } else if (!s.hasHero) {
-        status(ps, "Enter Apply hero named. " + availableHeroes());
+        status(ps, "Enter Apply reference named. " + availableHeroes());
         return done();
       }
     }
     Geometry g = geometry(ps);
     if (name == "analyze" && s.hero.chartModel != g.model) {
-      status(ps, "Hero chart model differs. Select the same chart model before "
+      status(ps, "Reference chart model differs. Select the same chart model before "
                  "applying.");
       return done();
     }
@@ -1092,7 +1123,7 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       s.hasTarget = false;
       s.solution = {};
       std::ostringstream o;
-      o << "Hero captured and ready for other clips: " << c.name << " r"
+      o << "Reference captured and ready for other clips: " << c.name << " r"
         << c.revision << " · " << std::hex << fingerprint(c);
       resultStatus = o.str();
     } else {
@@ -1107,14 +1138,14 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       s.hasTarget = true;
       s.solution = fit.solution;
       std::ostringstream o;
-      o << "Applied hero " << s.hero.name << ": " << fit.solution.neutralCount
+      o << "Applied reference " << s.hero.name << ": " << fit.solution.neutralCount
         << " neutral, " << fit.solution.colorCount << " color patches";
       if (!fit.error.empty())
         o << " · " << fit.error;
       resultStatus = o.str();
     }
-    EditGroup edit(ps, name == "captureHero" ? "Capture Hero"
-                                             : "Apply Hero to This Clip");
+    EditGroup edit(ps, name == "captureHero" ? "Capture reference"
+                                             : "Apply reference to this clip");
     if (!commitState(ps, s)) {
       status(ps, "Could not save the captured match in Resolve; previous "
                  "correction kept");
@@ -1132,7 +1163,7 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     if (s.hasHero && s.hasTarget) {
       auto fit = solve(s.hero, s.target, geometry(ps));
       if (fit.solution.valid) {
-        EditGroup edit(ps, "Refit Camera Match");
+        EditGroup edit(ps, "Refit camera match");
         s.solution = fit.solution;
         if (!commitState(ps, s)) {
           status(
@@ -1145,7 +1176,7 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       } else
         status(ps, fit.error);
     } else
-      status(ps, "Capture hero and target before refitting");
+      status(ps, "Capture reference and target before refitting");
     return done();
   }
   if (name == "resetAlignment") {
@@ -1288,30 +1319,76 @@ OfxStatus describeContext(OfxImageEffectHandle e) {
   prop->propSetString(cp, kOfxImageEffectPropSupportedComponents, 1,
                       kOfxImageComponentRGB);
   auto ps = paramSet(e);
+  define(ps, kOfxParamTypeGroup, "captureGroup", "Capture");
+  prop->propSetInt(desc(ps, "captureGroup"), kOfxParamPropGroupOpen, 0, 1);
+  define(ps, kOfxParamTypeString, "heroName", "Save reference as");
+  parent(ps, "heroName", "captureGroup");
+  prop->propSetString(desc(ps, "heroName"), kOfxParamPropDefault, 0, "");
+  define(ps, kOfxParamTypePushButton, "captureHero", "Capture reference");
+  parent(ps, "captureHero", "captureGroup");
+
+  define(ps, kOfxParamTypeGroup, "applyGroup", "Apply reference adjustments");
+  prop->propSetInt(desc(ps, "applyGroup"), kOfxParamPropGroupOpen, 0, 1);
+  define(ps, kOfxParamTypeString, "heroToApply", "Apply reference named");
+  parent(ps, "heroToApply", "applyGroup");
+  prop->propSetString(desc(ps, "heroToApply"), kOfxParamPropDefault, 0, "");
+  define(ps, kOfxParamTypePushButton, "analyze",
+         "Apply reference to this clip");
+  parent(ps, "analyze", "applyGroup");
+  define(ps, kOfxParamTypePushButton, "listHeroes",
+         "List captured references");
+  parent(ps, "listHeroes", "applyGroup");
+
+  define(ps, kOfxParamTypeGroup, "colorChartGroup", "Color chart");
+  prop->propSetInt(desc(ps, "colorChartGroup"), kOfxParamPropGroupOpen, 0, 1);
   choice(ps, "chartModel", "Chart model",
-         {"ColorChecker Video", "Color Checker Passport Video"});
+         {"Color Checker Video", "Color Checker Passport Video"});
+  parent(ps, "chartModel", "colorChartGroup");
   prop->propSetInt(desc(ps, "chartModel"), kOfxParamPropDefault, 0, 1);
-  define(ps, kOfxParamTypeString, "heroName", "Capture hero as");
-  prop->propSetString(desc(ps, "heroName"), kOfxParamPropDefault, 0,
-                      "");
-  define(ps, kOfxParamTypePushButton, "captureHero", "Capture Hero");
-  define(ps, kOfxParamTypeString, "heroToApply", "Apply hero named");
-  prop->propSetString(desc(ps, "heroToApply"), kOfxParamPropDefault, 0,
-                      "");
-  define(ps, kOfxParamTypePushButton, "analyze", "Apply Hero to This Clip");
-  define(ps, kOfxParamTypePushButton, "listHeroes", "List Captured Heroes");
-  define(ps, kOfxParamTypePushButton, "makeHeroAvailable",
-         "Use This Hero for Other Clips");
-  define(ps, kOfxParamTypeBoolean, "showOverlay", "Show overlay");
+  define(ps, kOfxParamTypeBoolean, "showOverlay",
+         "Show color chart overlay");
+  parent(ps, "showOverlay", "colorChartGroup");
   prop->propSetInt(desc(ps, "showOverlay"), kOfxParamPropDefault, 0, 1);
   choice(ps, "editMode", "Edit mode",
          {"Align chart", "Select patches", "Adjust samples"});
+  parent(ps, "editMode", "colorChartGroup");
   choice(ps, "rotation", "Rotate chart",
          {"0 degrees", "90 degrees", "180 degrees", "270 degrees"});
+  parent(ps, "rotation", "colorChartGroup");
   define(ps, kOfxParamTypeBoolean, "mirror", "Mirror patch identity");
+  parent(ps, "mirror", "colorChartGroup");
   prop->propSetInt(desc(ps, "mirror"), kOfxParamPropDefault, 0, 0);
+
+  define(ps, kOfxParamTypeGroup, "adjustmentsGroup",
+         "Reference adjustments");
+  prop->propSetInt(desc(ps, "adjustmentsGroup"), kOfxParamPropGroupOpen, 0, 1);
+  for (auto pair : {std::pair<const char *, const char *>{"hue", "Hue match"},
+                    {"sat", "Saturation match"},
+                    {"exposure", "Exposure match"},
+                    {"neutral", "Neutral balance match"}}) {
+    define(ps, kOfxParamTypeDouble, pair.first, pair.second);
+    parent(ps, pair.first, "adjustmentsGroup");
+    defaultDouble(ps, pair.first, 100, 0, 100);
+  }
+
+  define(ps, kOfxParamTypeBoolean, "bypass", "Bypass");
+  prop->propSetInt(desc(ps, "bypass"), kOfxParamPropDefault, 0, 0);
+  define(ps, kOfxParamTypeString, "referenceStatus", "Reference status");
+  prop->propSetString(
+      desc(ps, "referenceStatus"), kOfxParamPropDefault, 0,
+      "No reference on this node. Enter Apply reference named, then apply.");
+  prop->propSetInt(desc(ps, "referenceStatus"), kOfxParamPropEnabled, 0, 0);
+  define(ps, kOfxParamTypeString, "status", "Status");
+  prop->propSetString(
+      desc(ps, "status"), kOfxParamPropDefault, 0,
+      "Name and capture a reference, or enter its name and apply it to this clip");
+  prop->propSetInt(desc(ps, "status"), kOfxParamPropEnabled, 0, 0);
+
   define(ps, kOfxParamTypeGroup, "advanced", "Advanced");
   prop->propSetInt(desc(ps, "advanced"), kOfxParamPropGroupOpen, 0, 0);
+  define(ps, kOfxParamTypePushButton, "makeHeroAvailable",
+         "Use this reference for other clips");
+  parent(ps, "makeHeroAvailable", "advanced");
   define(ps, kOfxParamTypePushButton, "resetAlignment", "Reset alignment");
   parent(ps, "resetAlignment", "advanced");
   const Point c[4] = {{384, 864}, {1536, 864}, {1536, 216}, {384, 216}};
@@ -1363,37 +1440,18 @@ OfxStatus describeContext(OfxImageEffectHandle e) {
   defaultDouble(ps, "sampleInset", 50, 10, 90);
   define(ps, kOfxParamTypePushButton, "resetSample", "Reset selected sample");
   parent(ps, "resetSample", "advanced");
-  define(ps, kOfxParamTypePushButton, "refit", "Refit Captured Samples");
+  define(ps, kOfxParamTypePushButton, "refit", "Refit captured samples");
   parent(ps, "refit", "advanced");
-  for (auto pair : {std::pair<const char *, const char *>{"hue", "Hue Match"},
-                    {"sat", "Saturation Match"},
-                    {"exposure", "Exposure Match"},
-                    {"neutral", "Neutral Balance Match"}}) {
-    define(ps, kOfxParamTypeDouble, pair.first, pair.second);
-    defaultDouble(ps, pair.first, 100, 0, 100);
-  }
-  define(ps, kOfxParamTypeBoolean, "bypass", "Bypass");
-  prop->propSetInt(desc(ps, "bypass"), kOfxParamPropDefault, 0, 0);
   define(ps, kOfxParamTypeString, "inputContract", "Input contract");
   parent(ps, "inputContract", "advanced");
   prop->propSetString(desc(ps, "inputContract"), kOfxParamPropDefault, 0,
                       "DaVinci Wide Gamut / Intermediate; normalize upstream");
   prop->propSetInt(desc(ps, "inputContract"), kOfxParamPropEnabled, 0, 0);
-  define(ps, kOfxParamTypeString, "referenceStatus", "Reference status");
-  prop->propSetString(
-      desc(ps, "referenceStatus"), kOfxParamPropDefault, 0,
-      "No hero on this node. Enter Apply hero named, then Apply Hero.");
-  prop->propSetInt(desc(ps, "referenceStatus"), kOfxParamPropEnabled, 0, 0);
   define(ps, kOfxParamTypeString, "patchReport", "Selected patch report");
   parent(ps, "patchReport", "advanced");
   prop->propSetString(desc(ps, "patchReport"), kOfxParamPropDefault, 0,
                       "No sample yet");
   prop->propSetInt(desc(ps, "patchReport"), kOfxParamPropEnabled, 0, 0);
-  define(ps, kOfxParamTypeString, "status", "Status");
-  prop->propSetString(
-      desc(ps, "status"), kOfxParamPropDefault, 0,
-      "Name and capture a hero, or enter its name and apply it to this clip");
-  prop->propSetInt(desc(ps, "status"), kOfxParamPropEnabled, 0, 0);
   define(ps, kOfxParamTypeString, payload, "Captured match data");
   prop->propSetInt(desc(ps, payload), kOfxParamPropSecret, 0, 1);
   prop->propSetString(desc(ps, payload), kOfxParamPropDefault, 0,
@@ -1427,12 +1485,23 @@ OfxStatus mainEntry(const char *action, const void *handle,
     if (!strcmp(action, kOfxImageEffectActionDescribeInContext))
       return describeContext(e);
     if (!strcmp(action, kOfxActionCreateInstance)) {
-      setInstance(e, new Instance);
+      auto *i = new Instance;
+      setInstance(e, i);
+      auto ps = paramSet(e);
+      std::string name = trimName(gs(ps, "heroName"));
+      if (name.empty()) {
+        name = suggestReferenceName(i);
+        ss(ps, "heroName", name);
+      } else {
+        claimReferenceName(i, name);
+      }
       return kOfxStatOK;
     }
     if (!strcmp(action, kOfxActionDestroyInstance)) {
       auto *i = instance(e);
       setInstance(e, nullptr);
+      if (i)
+        claimReferenceName(i, "");
       delete i;
       return kOfxStatOK;
     }
@@ -1458,7 +1527,7 @@ OfxStatus mainEntry(const char *action, const void *handle,
   }
 }
 void setHost(OfxHost *h) { host = h; }
-OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 7, setHost, mainEntry};
+OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 9, setHost, mainEntry};
 } // namespace
 extern "C" {
 OfxExport int OfxGetNumberOfPlugins() { return 1; }
