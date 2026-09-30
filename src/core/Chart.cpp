@@ -8,15 +8,37 @@ namespace cm {
 // y=104..315. Skin column: 6; narrow neutral ramp: 6; large gray blocks: 4;
 // primary columns: 12; corner checks: 4.
 const std::vector<Patch> &layout(int model) {
-  if (model == 1) {
+  if (model == 2) {
     static const std::vector<Patch> passport = []() {
       std::vector<Patch> a;
       static const char *ids[24] = {
-          "Color 1", "Skin 1",  "Gray 1",  "Check 1",     "Color 2",
-          "Skin 2",  "Gray 2",  "Check 2", "Color 3",     "Skin 3",
-          "Gray 3",  "Check 3", "Color 4", "Skin 4",      "Gray 4",
-          "Check 4", "Color 5", "Skin 5",  "Gray 5",      "Check 5",
-          "Color 6", "Skin 6",  "Gray 6",  "Glossy black"};
+          "Color 1", "Color 2", "Color 3", "Color 4", "Color 5", "Color 6",
+          "Skin 1",  "Skin 2",  "Skin 3",  "Skin 4",  "Skin 5",  "Skin 6",
+          "Gray 1",  "Gray 2",  "Gray 3",  "Gray 4",  "Gray 5",  "Gray 6",
+          "Gray 7",  "Gray 8",  "Black",   "Gray 9",  "White 1", "White 2"};
+      for (int row = 0; row < 4; row++)
+        for (int col = 0; col < 6; col++) {
+          double x = .065 + col * .148, y = .08 + row * .222;
+          a.push_back({ids[row * 6 + col],
+                       {x, y, x + .12, y + .17},
+                       row == 0   ? Role::Chromatic
+                       : row == 1 ? Role::Skin
+                                  : Role::Neutral,
+                       true});
+        }
+      return a;
+    }();
+    return passport;
+  }
+  if (model == 1) {
+    static const std::vector<Patch> legacyPassport = []() {
+      std::vector<Patch> a;
+      static const char *ids[24] = {
+          "Color 1", "Skin 1",  "Gray 1",  "Check 1", "Color 2",
+          "Skin 2",  "Gray 2",  "Check 2", "Color 3", "Skin 3",
+          "Gray 3",  "Check 3", "Color 4", "Skin 4", "Gray 4",
+          "Check 4", "Color 5", "Skin 5",  "Gray 5", "Check 5",
+          "Color 6", "Skin 6",  "Gray 6", "Glossy black"};
       for (int row = 0; row < 6; row++)
         for (int col = 0; col < 4; col++) {
           double x = .025 + col * .245, y = .018 + row * .164;
@@ -31,7 +53,7 @@ const std::vector<Patch> &layout(int model) {
         }
       return a;
     }();
-    return passport;
+    return legacyPassport;
   }
   static const std::vector<Patch> v = [] {
     std::vector<Patch> a;

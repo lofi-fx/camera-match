@@ -24,6 +24,12 @@ int main() {
   assert(!makeHomography(g).valid);
   assert(layout().size() == 30);
   assert(layout(1).size() == 24);
+  assert(layout(2).size() == 24);
+  assert(layout(2)[0].box.y1 == layout(2)[5].box.y1);
+  assert(layout(2)[6].box.y1 > layout(2)[0].box.y1);
+  assert(layout(2)[5].box.x1 > layout(2)[4].box.x1);
+  for (const auto &patch : layout(2))
+    assert(patch.defaultIncluded);
   for (double x : {-.2, -.01, 0., .001, .05, .5, 1., 4.})
     assert(std::abs(decodeIntermediate(encodeIntermediate(x)) - x) < 1e-10);
   RGB x{.3, .4, .2};
@@ -116,7 +122,7 @@ int main() {
   assert(rows[1][0] == 1 && rows[0][6] == 2);
   assert(view.at(9, 20) == nullptr && view.at(12, 20) == nullptr &&
          view.at(10, 22) == nullptr);
-  for (int model = 0; model < 2; model++)
+  for (int model = 0; model < 3; model++)
     for (double pixelAspect : {1.0, 1.5}) {
       Geometry chart;
       chart.model = model;
@@ -159,7 +165,7 @@ int main() {
         assert(std::abs(obs.rgb.b - values[j].b) < 1e-6);
       }
     }
-  for (int model = 0; model < 2; model++) {
+  for (int model = 0; model < 3; model++) {
     Geometry geo;
     geo.model = model;
     for (size_t j = 0; j < layout(model).size(); j++)
@@ -281,6 +287,22 @@ int main() {
     RGB lookup = transform(source, rbf.solution, rbfAmount, nullptr, &rbfLut);
     assert(std::abs(fitted.r - lookup.r) + std::abs(fitted.g - lookup.g) +
                std::abs(fitted.b - lookup.b) < .06);
+    double worstLookupError = 0;
+    for (int ri = 0; ri <= 6; ++ri)
+      for (int gi = 0; gi <= 6; ++gi)
+        for (int bi = 0; bi <= 6; ++bi) {
+          RGB probe{.05 + .15 * ri, .05 + .15 * gi, .05 + .15 * bi};
+          RGB direct = transform(probe, rbf.solution, rbfAmount);
+          RGB gridded = transform(probe, rbf.solution, rbfAmount, nullptr,
+                                  &rbfLut);
+          worstLookupError = std::max(
+              {worstLookupError, std::abs(direct.r - gridded.r),
+               std::abs(direct.g - gridded.g),
+               std::abs(direct.b - gridded.b)});
+        }
+    assert(worstLookupError < .01);
+    RGB black = transform({0, 0, 0}, rbf.solution, rbfAmount);
+    assert(std::abs(black.r) + std::abs(black.g) + std::abs(black.b) < .03);
     rbfAmount.biasWeight = 0;
     RGB noRbf = transform(source, rbf.solution, rbfAmount, nullptr, &rbfLut);
     assert(noRbf.r == source.r && noRbf.g == source.g && noRbf.b == source.b);
@@ -337,5 +359,52 @@ int main() {
   auto unchanged = transform(near, local, localAmount, &localLut);
   assert(unchanged.r == near.r && unchanged.g == near.g &&
          unchanged.b == near.b);
+  // Golden values from Color Workspace's Python fit_rbf_model with the
+  // DWG/DI preset's support, regularization, and black anchor.
+  const std::array<RGB, 8> pythonSource = {{{.15, .20, .22},
+                                             {.30, .25, .20},
+                                             {.45, .38, .28},
+                                             {.62, .40, .30},
+                                             {.22, .48, .32},
+                                             {.38, .55, .46},
+                                             {.60, .60, .56},
+                                             {.72, .68, .64}}};
+  const std::array<RGB, 8> pythonDelta = {{{.01, -.005, .005},
+                                            {.02, 0, -.01},
+                                            {.03, .01, .015},
+                                            {.01, .02, 0},
+                                            {-.01, .015, .02},
+                                            {.005, .005, -.005},
+                                            {.02, -.005, .01},
+                                            {.01, .005, .015}}};
+  Geometry pythonGeometry;
+  Capture pythonHero, pythonTarget;
+  for (int j = 0; j < 8; ++j) {
+    pythonTarget.patch[j].rgb = decode(pythonSource[j]);
+    pythonHero.patch[j].rgb = decode(pythonSource[j] + pythonDelta[j]);
+    pythonTarget.patch[j].valid = pythonHero.patch[j].valid = 100;
+  }
+  auto pythonFit = solve(pythonHero, pythonTarget, pythonGeometry,
+                         MatchMethod::Rbf);
+  assert(pythonFit.solution.valid && pythonFit.solution.rbfCount == 9);
+  const std::array<RGB, 4> probes = {{{.2, .3, .4},
+                                       {.45, .42, .35},
+                                       {.65, .57, .5},
+                                       {0, 0, 0}}};
+  const std::array<RGB, 4> expected = {{{.209813374562, .278988735824,
+                                          .401763688336},
+                                         {.469776315979, .425905522436,
+                                          .359464214851},
+                                         {.669459286823, .574871396064,
+                                          .508043512551},
+                                         {.001272684036, -.000267901954,
+                                          -.000385090074}}};
+  for (size_t j = 0; j < probes.size(); ++j) {
+    RGB actual = transform(probes[j], pythonFit.solution,
+                           Amounts{0, 0, 0, 0, false, 1});
+    assert(std::abs(actual.r - expected[j].r) < 1e-5);
+    assert(std::abs(actual.g - expected[j].g) < 1e-5);
+    assert(std::abs(actual.b - expected[j].b) < 1e-5);
+  }
   std::cout << "core checks passed\n";
 }

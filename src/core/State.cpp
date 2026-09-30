@@ -58,7 +58,7 @@ static bool readCapture(std::istream &i, Capture &c) {
     if (!(i >> p.rgb.r >> p.rgb.g >> p.rgb.b >> p.dispersion >> p.valid >>
           p.candidate >> p.flags))
       return false;
-  if (c.chartModel < 0 || c.chartModel > 1 ||
+  if (c.chartModel < 0 || c.chartModel > 2 ||
       c.geometry.model != c.chartModel || c.width < 0 || c.height < 0 ||
       !std::isfinite(c.time) || !std::isfinite(c.scaleX) ||
       !std::isfinite(c.scaleY) || !std::isfinite(c.par) || c.scaleX <= 0 ||

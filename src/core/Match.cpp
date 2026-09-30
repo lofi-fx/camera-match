@@ -92,19 +92,17 @@ static SolveResult solveRbf(const Capture &hero, const Capture &target,
     else
       ++s.colorCount;
   }
-  int n = s.rbfCount;
-  if (n < 7) {
+  if (s.rbfCount < 7) {
     result.error = "RBF needs at least seven usable chart patches";
     return result;
   }
-  std::vector<double> distances;
-  for (int i = 0; i < n; ++i)
-    for (int j = i + 1; j < n; ++j) {
-      double d = distance(s.rbfCenters[i], s.rbfCenters[j]);
-      if (d > 1e-8)
-        distances.push_back(d);
-    }
-  s.rbfSupport = clamp(median(distances) * 1.5, .01, 2.);
+  // Match Color Workspace's DWG/DI preset: black anchor, narrow support,
+  // and stronger regularization to avoid local color oscillation.
+  s.rbfCenters[s.rbfCount] = {};
+  s.rbfWeights[s.rbfCount] = {};
+  ++s.rbfCount;
+  int n = s.rbfCount;
+  s.rbfSupport = .1;
   int size = n + 4;
   std::vector<std::vector<double>> a(size, std::vector<double>(size + 3));
   for (int i = 0; i < n; ++i) {
@@ -113,7 +111,7 @@ static SolveResult solveRbf(const Capture &hero, const Capture &target,
       double r = distance(x, s.rbfCenters[j]) / s.rbfSupport;
       a[i][j] = std::exp(-r * r);
     }
-    a[i][i] += .001;
+    a[i][i] += .2;
     double p[4] = {1, x.r, x.g, x.b};
     for (int j = 0; j < 4; ++j)
       a[i][n + j] = a[n + j][i] = p[j];
@@ -292,7 +290,7 @@ RadialLut makeRadialLut(const Solution &s) {
     }
   return lut;
 }
-constexpr double rbfMin = -.25, rbfMax = 1.5;
+constexpr double rbfMin = 0, rbfMax = 1;
 RbfLut makeRbfLut(const Solution &s) {
   RbfLut lut;
   for (int r = 0; r < rbfGridSize; ++r)

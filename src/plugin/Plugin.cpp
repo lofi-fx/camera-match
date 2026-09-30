@@ -223,7 +223,7 @@ void decodeGeometry(const std::string &text, Geometry &g) {
 }
 Geometry geometry(OfxParamSetHandle ps) {
   Geometry g;
-  g.model = gi(ps, "chartModel");
+  g.model = gi(ps, "chartModel") == 1 ? 2 : 0;
   auto &patches = layout(g.model);
   for (size_t j = 0; j < g.included.size(); ++j)
     g.included[j] = j < patches.size() ? patches[j].defaultIncluded : false;
@@ -335,7 +335,7 @@ void referenceStatus(OfxParamSetHandle ps, const Persistent &s) {
 void patchReport(OfxParamSetHandle ps) {
   auto s = state(ps);
   int j = gi(ps, "patchSelector");
-  int model = gi(ps, "chartModel");
+  int model = gi(ps, "chartModel") == 1 ? 2 : 0;
   if (j < 0 || j >= int(layout(model).size())) {
     ss(ps, "patchReport", "No patch selected");
     return;
@@ -1094,6 +1094,10 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     updateMatchControls(ps);
     auto s = state(ps);
     if (s.hasHero && s.hasTarget) {
+      if (s.hero.chartModel == 1 && geometry(ps).model == 2) {
+        status(ps, "Passport patch layout was corrected. Recapture the reference and target.");
+        return done();
+      }
       auto fit = solve(s.hero, s.target, geometry(ps), selectedMatchMethod(ps));
       if (!fit.solution.valid) {
         status(ps, fit.error);
@@ -1186,8 +1190,9 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     }
     Geometry g = geometry(ps);
     if (name == "analyze" && s.hero.chartModel != g.model) {
-      status(ps, "Reference chart model differs. Select the same chart model before "
-                 "applying.");
+      status(ps, s.hero.chartModel == 1 && g.model == 2
+                     ? "Passport patch layout was corrected. Recapture the reference before applying."
+                     : "Reference chart model differs. Select the same chart model before applying.");
       return done();
     }
     Capture c;
@@ -1246,6 +1251,10 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
   if (name == "refit") {
     auto s = state(ps);
     if (s.hasHero && s.hasTarget) {
+      if (s.hero.chartModel == 1 && geometry(ps).model == 2) {
+        status(ps, "Passport patch layout was corrected. Recapture the reference and target.");
+        return done();
+      }
       auto fit = solve(s.hero, s.target, geometry(ps), selectedMatchMethod(ps));
       if (fit.solution.valid) {
         EditGroup edit(ps, "Refit camera match");
@@ -1498,10 +1507,10 @@ OfxStatus describeContext(OfxImageEffectHandle e) {
   define(ps, kOfxParamTypeString, geoPayload, "Geometry data");
   prop->propSetInt(desc(ps, geoPayload), kOfxParamPropSecret, 0, 1);
   Geometry defaultGeometry;
-  defaultGeometry.model = 1;
+  defaultGeometry.model = 2;
   for (size_t j = 0; j < defaultGeometry.included.size(); ++j)
     defaultGeometry.included[j] =
-        j < layout(1).size() ? layout(1)[j].defaultIncluded : false;
+        j < layout(2).size() ? layout(2)[j].defaultIncluded : false;
   prop->propSetString(desc(ps, geoPayload), kOfxParamPropDefault, 0,
                       encodeGeometry(defaultGeometry).c_str());
   define(ps, kOfxParamTypeChoice, "patchSelector", "Selected patch");
@@ -1581,7 +1590,9 @@ OfxStatus mainEntry(const char *action, const void *handle,
       auto ps = paramSet(e);
       updateMatchControls(ps);
       auto savedMatch = state(ps);
-      if (savedMatch.hasTarget &&
+      if (savedMatch.hasHero && savedMatch.hero.chartModel == 1)
+        status(ps, "Passport patch layout was corrected. Recapture the reference and target.");
+      else if (savedMatch.hasTarget &&
           savedMatch.solution.method == MatchMethod::RadialLegacy)
         status(ps, "Saved legacy radial fit. Press Apply reference to this clip to use RBF match.");
       std::string name = trimName(gs(ps, "heroName"));
@@ -1627,7 +1638,7 @@ OfxStatus mainEntry(const char *action, const void *handle,
   }
 }
 void setHost(OfxHost *h) { host = h; }
-OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 12, setHost, mainEntry};
+OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 13, setHost, mainEntry};
 } // namespace
 extern "C" {
 OfxExport int OfxGetNumberOfPlugins() { return 1; }

@@ -30,7 +30,7 @@ constexpr int radialGridSize = 64;
 struct RadialLut {
   std::array<float, radialGridSize * radialGridSize * 2> values{};
 };
-constexpr int rbfGridSize = 33;
+constexpr int rbfGridSize = 65;
 struct RbfLut {
   std::array<float, rbfGridSize * rbfGridSize * rbfGridSize * 3> values{};
 };

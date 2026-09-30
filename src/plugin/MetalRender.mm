@@ -64,9 +64,9 @@ float2 radial(float2 chroma, device const float2 *lut) {
   return mix(mix(v00, v10, t.x), mix(v01, v11, t.x), t.y);
 }
 float3 rbf(float3 input, device const float *lut) {
-  float3 q = (input + .25f) * (32.f / 1.75f);
-  if (any(q < 0.f) || any(q > 32.f)) return input;
-  int3 a = int3(q), b = min(a + 1, int3(32));
+  float3 q = input * 64.f;
+  if (any(q < 0.f) || any(q > 64.f)) return input;
+  int3 a = int3(q), b = min(a + 1, int3(64));
   float3 t = q - float3(a);
   float3 v = float3(0.f);
   for (int mask=0; mask<8; ++mask) {
@@ -76,7 +76,7 @@ float3 rbf(float3 input, device const float *lut) {
     float w = (mask & 1 ? t.x : 1.f-t.x) *
               (mask & 2 ? t.y : 1.f-t.y) *
               (mask & 4 ? t.z : 1.f-t.z);
-    int index = ((ri*33+gi)*33+bi)*3;
+    int index = ((ri*65+gi)*65+bi)*3;
     v += float3(lut[index],lut[index+1],lut[index+2]) * w;
   }
   return v;
