@@ -267,11 +267,14 @@ std::string trimName(std::string name) {
   return name;
 }
 void updateMatchControls(OfxParamSetHandle ps) {
-  auto p = param(ps, "biasWeight");
-  OfxPropertySetHandle properties = nullptr;
-  if (p && params->paramGetPropertySet(p, &properties) == kOfxStatOK)
-    prop->propSetInt(properties, kOfxParamPropSecret, 0,
-                     gi(ps, "matchMethod") == 1 ? 0 : 1);
+  bool radial = gi(ps, "matchMethod") == 1;
+  for (const char *name : {"biasWeight", "hue", "sat"}) {
+    auto p = param(ps, name);
+    OfxPropertySetHandle properties = nullptr;
+    if (p && params->paramGetPropertySet(p, &properties) == kOfxStatOK)
+      prop->propSetInt(properties, kOfxParamPropSecret, 0,
+                       std::strcmp(name, "biasWeight") == 0 ? !radial : radial);
+  }
 }
 void claimReferenceName(Instance *inst, const std::string &name) {
   std::lock_guard<std::mutex> lock(referenceNameMutex);
@@ -348,7 +351,9 @@ void patchReport(OfxParamSetHandle ps) {
         o.precision(2);
         o << " · exposure " << std::log2(y1 / y2) << " stops";
       }
-      Amounts a{gd(ps, "hue", 100) / 100., gd(ps, "sat", 100) / 100.,
+      bool radial = s.solution.method == MatchMethod::Radial;
+      Amounts a{radial ? 1. : gd(ps, "hue", 100) / 100.,
+                radial ? 1. : gd(ps, "sat", 100) / 100.,
                 gd(ps, "exposure", 100) / 100., gd(ps, "neutral", 100) / 100.,
                 false, gd(ps, "biasWeight", 100) / 100.};
       RGB after = decode(transform(encode(p.rgb), s.solution, a));
@@ -550,7 +555,9 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     snapshot = inst->renderSnapshot;
   }
   const auto &s = snapshot->solution;
-  Amounts a{gd(ps, "hue", 100) / 100., gd(ps, "sat", 100) / 100.,
+  bool radial = s.method == MatchMethod::Radial;
+  Amounts a{radial ? 1. : gd(ps, "hue", 100) / 100.,
+            radial ? 1. : gd(ps, "sat", 100) / 100.,
             gd(ps, "exposure", 100) / 100., gd(ps, "neutral", 100) / 100.,
             gi(ps, "bypass") != 0, gd(ps, "biasWeight", 100) / 100.};
   bool exactCopy =
@@ -1053,11 +1060,6 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     return kOfxStatOK;
   std::string name = n;
   auto ps = paramSet(e);
-  if (name == "matchMethod") {
-    updateMatchControls(ps);
-    status(ps, "Match method selected. Press Apply reference to this clip to fit it.");
-    return kOfxStatOK;
-  }
   if (name == "heroName") {
     claimReferenceName(inst, trimName(gs(ps, "heroName")));
     return kOfxStatOK;
@@ -1076,6 +1078,33 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     redrawOverlays(inst, name == "showOverlay");
     return kOfxStatOK;
   };
+  if (name == "matchMethod") {
+    updateMatchControls(ps);
+    auto s = state(ps);
+    if (s.hasHero && s.hasTarget) {
+      auto fit = solve(s.hero, s.target, geometry(ps),
+                       MatchMethod(gi(ps, "matchMethod")));
+      if (!fit.solution.valid) {
+        status(ps, fit.error);
+        return done();
+      }
+      s.solution = fit.solution;
+      EditGroup edit(ps, "Change match method");
+      if (!commitState(ps, s)) {
+        status(ps, "Could not save the selected match method");
+        return done();
+      }
+      status(ps, std::string("Applied ") +
+                     (fit.solution.method == MatchMethod::Radial
+                          ? "radial bias"
+                          : "existing match") +
+                     (fit.error.empty() ? "" : " · " + fit.error));
+      patchReport(ps);
+    } else {
+      status(ps, "Match method selected. Apply a reference to this clip.");
+    }
+    return done();
+  }
   if (name == "showOverlay") {
     status(ps, gi(ps, "showOverlay")
                    ? "Overlay requested. If guides stay hidden, select Open FX Overlay beneath the viewer."
@@ -1566,9 +1595,9 @@ OfxStatus mainEntry(const char *action, const void *handle,
       auto ps = paramSet(e);
       auto s = state(ps);
       if (!s.solution.valid || gi(ps, "bypass") ||
-          (((gd(ps, "hue") == 0 && gd(ps, "sat") == 0) ||
-            (s.solution.method == MatchMethod::Radial &&
-             gd(ps, "biasWeight", 100) == 0)) &&
+          ((s.solution.method == MatchMethod::Radial
+                ? gd(ps, "biasWeight", 100) == 0
+                : gd(ps, "hue") == 0 && gd(ps, "sat") == 0) &&
            gd(ps, "exposure") == 0 && gd(ps, "neutral") == 0)) {
         prop->propSetString(out, kOfxPropName, 0,
                             kOfxImageEffectSimpleSourceClipName);
@@ -1582,7 +1611,7 @@ OfxStatus mainEntry(const char *action, const void *handle,
   }
 }
 void setHost(OfxHost *h) { host = h; }
-OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 10, setHost, mainEntry};
+OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 11, setHost, mainEntry};
 } // namespace
 extern "C" {
 OfxExport int OfxGetNumberOfPlugins() { return 1; }

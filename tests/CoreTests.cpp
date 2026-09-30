@@ -189,12 +189,18 @@ int main() {
         {shifted.L, chroma * std::cos(angle), chroma * std::sin(angle)});
     auto radial = solve(hero, target, geo, MatchMethod::Radial);
     assert(radial.solution.valid && radial.solution.radialCount >= 4);
+    auto harmonic = solve(hero, target, geo, MatchMethod::Harmonic);
+    assert(harmonic.solution.valid);
     auto lut = makeRadialLut(radial.solution);
     Amounts chromatic{1, 1, 0, 0, false, 1};
     auto direct = transform(encode(target.patch[chosen].rgb),
                             radial.solution, chromatic);
     auto cached = transform(encode(target.patch[chosen].rgb),
                             radial.solution, chromatic, &lut);
+    auto broad = transform(encode(target.patch[chosen].rgb),
+                           harmonic.solution, chromatic);
+    assert(std::abs(broad.r - cached.r) + std::abs(broad.g - cached.g) +
+               std::abs(broad.b - cached.b) > 1e-4);
     assert(std::abs(direct.r - cached.r) < .003);
     assert(std::abs(direct.g - cached.g) < .003);
     assert(std::abs(direct.b - cached.b) < .003);
