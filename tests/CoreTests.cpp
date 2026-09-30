@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <thread>
 #include <vector>
 using namespace cm;
 int main() {
@@ -256,6 +257,12 @@ int main() {
     assert(reopened.solution.method == MatchMethod::RadialLegacy);
     auto rbf = solve(hero, target, geo, MatchMethod::Rbf);
     assert(rbf.solution.valid && rbf.solution.rbfCount >= 7);
+    // Resolve calls render on worker threads with much smaller stacks than main.
+    std::thread worker([&] {
+      auto lookup = makeRbfLut(rbf.solution);
+      assert(lookup && std::isfinite(lookup->values[0]));
+    });
+    worker.join();
     auto rbfLut = makeRbfLut(rbf.solution);
     RGB source = encode(target.patch[chosen].rgb);
     RGB wanted = encode(hero.patch[chosen].rgb);
@@ -284,7 +291,7 @@ int main() {
                            std::abs(neutralSource.g - neutralWanted.g) +
                            std::abs(neutralSource.b - neutralWanted.b);
     assert(neutralError < neutralBefore);
-    RGB lookup = transform(source, rbf.solution, rbfAmount, nullptr, &rbfLut);
+    RGB lookup = transform(source, rbf.solution, rbfAmount, nullptr, rbfLut.get());
     assert(std::abs(fitted.r - lookup.r) + std::abs(fitted.g - lookup.g) +
                std::abs(fitted.b - lookup.b) < .06);
     double worstLookupError = 0;
@@ -294,7 +301,7 @@ int main() {
           RGB probe{.05 + .15 * ri, .05 + .15 * gi, .05 + .15 * bi};
           RGB direct = transform(probe, rbf.solution, rbfAmount);
           RGB gridded = transform(probe, rbf.solution, rbfAmount, nullptr,
-                                  &rbfLut);
+                                  rbfLut.get());
           worstLookupError = std::max(
               {worstLookupError, std::abs(direct.r - gridded.r),
                std::abs(direct.g - gridded.g),
@@ -304,7 +311,7 @@ int main() {
     RGB black = transform({0, 0, 0}, rbf.solution, rbfAmount);
     assert(std::abs(black.r) + std::abs(black.g) + std::abs(black.b) < .03);
     rbfAmount.biasWeight = 0;
-    RGB noRbf = transform(source, rbf.solution, rbfAmount, nullptr, &rbfLut);
+    RGB noRbf = transform(source, rbf.solution, rbfAmount, nullptr, rbfLut.get());
     assert(noRbf.r == source.r && noRbf.g == source.g && noRbf.b == source.b);
     savedRadial.solution = rbf.solution;
     assert(deserialize(serialize(savedRadial), reopened));

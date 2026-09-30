@@ -291,8 +291,8 @@ RadialLut makeRadialLut(const Solution &s) {
   return lut;
 }
 constexpr double rbfMin = 0, rbfMax = 1;
-RbfLut makeRbfLut(const Solution &s) {
-  RbfLut lut;
+std::shared_ptr<const RbfLut> makeRbfLut(const Solution &s) {
+  auto lut = std::make_shared<RbfLut>();
   for (int r = 0; r < rbfGridSize; ++r)
     for (int g = 0; g < rbfGridSize; ++g)
       for (int b = 0; b < rbfGridSize; ++b) {
@@ -301,9 +301,9 @@ RbfLut makeRbfLut(const Solution &s) {
               rbfMin + (rbfMax - rbfMin) * b / (rbfGridSize - 1)};
         RGB y = evaluateRbf(s, x);
         int i = ((r * rbfGridSize + g) * rbfGridSize + b) * 3;
-        lut.values[i] = float(y.r);
-        lut.values[i + 1] = float(y.g);
-        lut.values[i + 2] = float(y.b);
+        lut->values[i] = float(y.r);
+        lut->values[i + 1] = float(y.g);
+        lut->values[i + 2] = float(y.b);
       }
   return lut;
 }

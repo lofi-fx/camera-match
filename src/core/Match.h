@@ -3,6 +3,7 @@
 #include "Color.h"
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 namespace cm {
 struct Observation {
@@ -62,7 +63,7 @@ SolveResult solve(const Capture &hero, const Capture &target,
                   const Geometry &geometry,
                   MatchMethod method = MatchMethod::Harmonic);
 RadialLut makeRadialLut(const Solution &solution);
-RbfLut makeRbfLut(const Solution &solution);
+std::shared_ptr<const RbfLut> makeRbfLut(const Solution &solution);
 RGB transform(RGB encoded, const Solution &solution, const Amounts &amounts,
               const RadialLut *lut = nullptr, const RbfLut *rbfLut = nullptr);
 } // namespace cm

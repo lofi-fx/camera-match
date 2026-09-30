@@ -101,7 +101,7 @@ int main() {
     solution.rbfAffine[1] = {1, 0, 0};
     solution.rbfAffine[2] = {0, 1, 0};
     solution.rbfAffine[3] = {0, 0, 1};
-    auto rbfLut = std::make_shared<RbfLut>(makeRbfLut(solution));
+    auto rbfLut = makeRbfLut(solution);
     p.method = 2;
     p.biasWeight = 1.2f;
     amount.biasWeight = 1.2;

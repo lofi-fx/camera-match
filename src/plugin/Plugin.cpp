@@ -557,7 +557,7 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
         next->lut = std::make_shared<RadialLut>(makeRadialLut(next->solution));
       if (next->solution.method == MatchMethod::Rbf &&
           next->solution.rbfCount > 0)
-        next->rbfLut = std::make_shared<RbfLut>(makeRbfLut(next->solution));
+        next->rbfLut = makeRbfLut(next->solution);
       inst->renderSnapshot = next;
     }
     snapshot = inst->renderSnapshot;
