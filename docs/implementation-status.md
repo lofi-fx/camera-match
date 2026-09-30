@@ -3,7 +3,7 @@
 ## Built
 
 - Native OFX filter and arm64 macOS bundle; one Source and one Output.
-- DrawSuite V2 viewer overlay with four-corner projective alignment, patch outlines, sample regions, three edit modes, inspector equivalents, orientation/mirror controls, and parameter edit grouping.
+- OpenGL V1 viewer overlay on macOS with four-corner projective alignment, patch outlines, sample regions, three edit modes, inspector equivalents, orientation/mirror controls, and parameter edit grouping.
 - Separate full-size ColorChecker Video and Passport Video color-target layouts. No published patch RGB target values are used.
 - Metal float-buffer rendering with a CPU fallback, Source sampling with median luminance outlier rejection, alpha handling, captured snapshots, checksum-validated project payload, hero revision/fingerprint, and frozen match coefficients.
 - Independent hue, saturation, exposure, and neutral controls. Chromatic stages preserve scene-linear DWG luminance in the tested domain.
@@ -16,7 +16,7 @@
 
 ## Resolve verification: partial
 
-The system installation under `/Library/OFX/Plugins` appeared in Resolve's LoFi FX group. The user reported that the overlay disappears after capture/apply even though Show overlay remains checked; the previous redraw change did not resolve it. The next build registers one overlay API path per host, tracks each viewer interaction for redraw, and logs lifecycle and draw outcomes to Resolve's debug log. This specific host fix remains unverified. The current build advertises Metal rendering. Other **unverified** areas are viewer drawing/drag at multiple zooms and proxies; parameter edit grouping and undo/redo; Source image fetch from `InstanceChanged`; hidden string payload length/copy/reopen; alpha behavior in a Resolve render; color management negotiation; export parity; physical chart patch alignment; real-footage match quality. See [host-test-checklist.md](host-test-checklist.md).
+The system installation under `/Library/OFX/Plugins` appeared in Resolve's LoFi FX group. In the installed 0.6.0 build, Resolve created overlay interact instances after project reload but did not send Draw actions when Show overlay was toggled. The 0.7.0 build subscribes each interact instance to its parameters, selects OpenGL V1 drawing on macOS, and logs redraw request results. This host behavior remains unverified in the new build. The current build advertises Metal rendering. Other **unverified** areas are viewer drawing/drag at multiple zooms and proxies; parameter edit grouping and undo/redo; Source image fetch from `InstanceChanged`; hidden string payload length/copy/reopen; alpha behavior in a Resolve render; color management negotiation; export parity; physical chart patch alignment; real-footage match quality. See [host-test-checklist.md](host-test-checklist.md).
 
 ## Known limits
 

@@ -39,6 +39,11 @@ const OfxImageEffectSuiteV1 *fx = nullptr;
 const OfxParameterSuiteV1 *params = nullptr;
 const OfxInteractSuiteV1 *interact = nullptr;
 const OfxDrawSuiteV1 *draw = nullptr;
+#ifdef __APPLE__
+constexpr bool useDrawSuite = false;
+#else
+constexpr bool useDrawSuite = true;
+#endif
 OfxHost *host = nullptr;
 constexpr const char *id = "com.lofifx.CameraMatch";
 constexpr const char *payload = "cameraMatchState";
@@ -65,7 +70,7 @@ void unregisterOverlay(Instance *i, OfxInteractHandle h) {
   auto &v = i->overlays;
   v.erase(std::remove(v.begin(), v.end(), h), v.end());
 }
-void redrawOverlays(Instance *i) {
+void redrawOverlays(Instance *i, bool diagnose = false) {
   if (!i || !interact)
     return;
   std::vector<OfxInteractHandle> handles;
@@ -73,8 +78,11 @@ void redrawOverlays(Instance *i) {
     std::lock_guard<std::mutex> lock(i->overlayMutex);
     handles = i->overlays;
   }
-  for (auto h : handles)
-    interact->interactRedraw(h);
+  for (auto h : handles) {
+    OfxStatus result = interact->interactRedraw(h);
+    if (diagnose)
+      std::fprintf(stderr, "CameraMatch interactRedraw status=%d\n", result);
+  }
 }
 struct EditGroup {
   OfxParamSetHandle ps;
@@ -656,7 +664,8 @@ OverlayResult drawOverlay(Interact *i, OfxPropertySetHandle args) {
   if (!i || !gi(paramSet(i->effect), "showOverlay", 1))
     return OverlayResult::Hidden;
   void *p = nullptr;
-  prop->propGetPointer(args, kOfxInteractPropDrawContext, 0, &p);
+  if (useDrawSuite)
+    prop->propGetPointer(args, kOfxInteractPropDrawContext, 0, &p);
   auto d = static_cast<OfxDrawContextHandle>(p);
 #ifndef __APPLE__
   if (!d || !draw)
@@ -769,6 +778,12 @@ OfxStatus overlayMain(const char *action, const void *handle,
       auto *i = new Interact;
       OfxPropertySetHandle p = nullptr;
       interact->interactGetPropertySet(h, &p);
+      const char *slaves[] = {"corner0",  "corner1",      "corner2",
+                              "corner3",  geoPayload,     payload,
+                              "chartModel", "rotation",   "mirror",
+                              "showOverlay", "editMode", "patchSelector"};
+      for (int j = 0; j < 12; j++)
+        prop->propSetString(p, kOfxInteractPropSlaveToParam, j, slaves[j]);
       void *e = nullptr;
       prop->propGetPointer(p, kOfxPropEffectInstance, 0, &e);
       i->effect = (OfxImageEffectHandle)e;
@@ -985,9 +1000,15 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       std::fprintf(stderr, "CameraMatch parameter %s: %zu overlays active\n",
                    name.c_str(), inst->overlays.size());
     }
-    redrawOverlays(inst);
+    redrawOverlays(inst, name == "showOverlay");
     return kOfxStatOK;
   };
+  if (name == "showOverlay") {
+    status(ps, gi(ps, "showOverlay")
+                   ? "Overlay requested. If guides stay hidden, select Open FX Overlay beneath the viewer."
+                   : "Overlay hidden");
+    return done();
+  }
   if (name == "listHeroes") {
     status(ps, availableHeroes());
     return done();
@@ -1248,7 +1269,7 @@ OfxStatus describe(OfxImageEffectHandle e) {
                    interact ? 1 : 0);
   if (interact)
     prop->propSetPointer(
-        p, draw ? kOfxImageEffectPluginPropOverlayInteractV2
+        p, draw && useDrawSuite ? kOfxImageEffectPluginPropOverlayInteractV2
                 : kOfxImageEffectPluginPropOverlayInteractV1,
         0, (void *)overlayMain);
   return kOfxStatOK;
@@ -1437,7 +1458,7 @@ OfxStatus mainEntry(const char *action, const void *handle,
   }
 }
 void setHost(OfxHost *h) { host = h; }
-OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 6, setHost, mainEntry};
+OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 7, setHost, mainEntry};
 } // namespace
 extern "C" {
 OfxExport int OfxGetNumberOfPlugins() { return 1; }
