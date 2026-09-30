@@ -81,8 +81,10 @@ float3 match(float3 input, constant Params &p, device const float2 *lut) {
   if (!all(isfinite(input))) return input;
   if (p.method == 2) {
     if (p.biasWeight <= 0.f) return input;
-    float3 matched = rbf(input, p);
-    float3 out = input + clamp(p.biasWeight,0.f,2.f)*(matched-input);
+    float3 linear = decodeDI(input);
+    float3 matched = rbf(linear, p);
+    float3 out = encodeDI(linear +
+                          clamp(p.biasWeight,0.f,2.f)*(matched-linear));
     return all(isfinite(out)) ? out : input;
   }
   float3 x = decodeDI(input);

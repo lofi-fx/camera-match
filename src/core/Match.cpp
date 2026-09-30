@@ -81,7 +81,7 @@ static SolveResult solveRbf(const Capture &hero, const Capture &target,
     if (!geo.included[j] || hero.patch[j].valid < 16 ||
         target.patch[j].valid < 16)
       continue;
-    RGB a = encode(target.patch[j].rgb), b = encode(hero.patch[j].rgb);
+    RGB a = target.patch[j].rgb, b = hero.patch[j].rgb;
     if (!finite(a) || !finite(b))
       continue;
     int index = s.rbfCount++;
@@ -96,8 +96,7 @@ static SolveResult solveRbf(const Capture &hero, const Capture &target,
     result.error = "RBF needs at least seven usable chart patches";
     return result;
   }
-  // Match Color Workspace's DWG/DI preset: black anchor, narrow support,
-  // and stronger regularization to avoid local color oscillation.
+  // Match Color Workspace's linear DWG preset with a pinned black anchor.
   s.rbfCenters[s.rbfCount] = {};
   s.rbfWeights[s.rbfCount] = {};
   ++s.rbfCount;
@@ -290,51 +289,6 @@ RadialLut makeRadialLut(const Solution &s) {
     }
   return lut;
 }
-constexpr double rbfMin = 0, rbfMax = 1;
-std::shared_ptr<const RbfLut> makeRbfLut(const Solution &s) {
-  auto lut = std::make_shared<RbfLut>();
-  for (int r = 0; r < rbfGridSize; ++r)
-    for (int g = 0; g < rbfGridSize; ++g)
-      for (int b = 0; b < rbfGridSize; ++b) {
-        RGB x{rbfMin + (rbfMax - rbfMin) * r / (rbfGridSize - 1),
-              rbfMin + (rbfMax - rbfMin) * g / (rbfGridSize - 1),
-              rbfMin + (rbfMax - rbfMin) * b / (rbfGridSize - 1)};
-        RGB y = evaluateRbf(s, x);
-        int i = ((r * rbfGridSize + g) * rbfGridSize + b) * 3;
-        lut->values[i] = float(y.r);
-        lut->values[i + 1] = float(y.g);
-        lut->values[i + 2] = float(y.b);
-      }
-  return lut;
-}
-static RGB sampleRbf(const RbfLut &lut, const Solution &s, RGB x) {
-  RGB bounded{clamp(x.r, rbfMin, rbfMax), clamp(x.g, rbfMin, rbfMax),
-              clamp(x.b, rbfMin, rbfMax)};
-  auto coordinate = [](double v) {
-    return (v - rbfMin) * (rbfGridSize - 1) / (rbfMax - rbfMin);
-  };
-  double p[3] = {coordinate(bounded.r), coordinate(bounded.g),
-                 coordinate(bounded.b)};
-  int lo[3] = {int(p[0]), int(p[1]), int(p[2])};
-  int hi[3] = {std::min(lo[0] + 1, rbfGridSize - 1),
-               std::min(lo[1] + 1, rbfGridSize - 1),
-               std::min(lo[2] + 1, rbfGridSize - 1)};
-  double t[3] = {p[0] - lo[0], p[1] - lo[1], p[2] - lo[2]};
-  RGB y{};
-  for (int mask = 0; mask < 8; ++mask) {
-    int r = mask & 1 ? hi[0] : lo[0];
-    int g = mask & 2 ? hi[1] : lo[1];
-    int b = mask & 4 ? hi[2] : lo[2];
-    double w = (mask & 1 ? t[0] : 1 - t[0]) *
-               (mask & 2 ? t[1] : 1 - t[1]) *
-               (mask & 4 ? t[2] : 1 - t[2]);
-    int i = ((r * rbfGridSize + g) * rbfGridSize + b) * 3;
-    y = y + RGB{lut.values[i], lut.values[i + 1], lut.values[i + 2]} * w;
-  }
-  RGB delta = x - bounded;
-  return y + s.rbfAffine[1] * delta.r + s.rbfAffine[2] * delta.g +
-         s.rbfAffine[3] * delta.b;
-}
 static std::array<double, 2> sampleRadial(const RadialLut &lut, double x,
                                           double y) {
   double gx = clamp((x + 1) * .5 * (radialGridSize - 1), 0,
@@ -356,13 +310,14 @@ static std::array<double, 2> sampleRadial(const RadialLut &lut, double x,
   return result;
 }
 RGB transform(RGB input, const Solution &s, const Amounts &a,
-              const RadialLut *lut, const RbfLut *rbfLut) {
+              const RadialLut *lut) {
   if (s.method == MatchMethod::Rbf) {
     if (a.bypass || !s.valid || !finite(input) || a.biasWeight <= 0)
       return input;
-    RGB matched = rbfLut ? sampleRbf(*rbfLut, s, input)
-                         : evaluateRbf(s, input);
-    RGB out = input + (matched - input) * clamp(a.biasWeight, 0, 2);
+    RGB linear = decode(input);
+    RGB matched = evaluateRbf(s, linear);
+    RGB out = encode(linear + (matched - linear) *
+                                 clamp(a.biasWeight, 0, 2));
     return finite(out) ? out : input;
   }
   if (a.bypass || !s.valid ||

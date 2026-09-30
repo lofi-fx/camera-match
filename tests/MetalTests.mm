@@ -123,10 +123,10 @@ int main() {
     for (int y = 0; y < height; ++y)
       for (int x = 0; x < width; ++x) {
         int i = (y * width + x) * 4;
-        input[i] = x == 0 ? -.1f : x == width - 1 ? 1.1f
-                                                   : float(x) / (width - 1);
-        input[i + 1] = .5f;
-        input[i + 2] = .5f;
+        input[i] = float(encodeIntermediate(x == 0 ? -.1 :
+                          x == width - 1 ? 4. : double(x) / (width - 1)));
+        input[i + 1] = float(encodeIntermediate(.5));
+        input[i + 2] = float(encodeIntermediate(.5));
       }
     p.method = 2;
     p.biasWeight = 1.2f;

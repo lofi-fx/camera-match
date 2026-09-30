@@ -3,7 +3,6 @@
 #include "Color.h"
 #include <array>
 #include <cstdint>
-#include <memory>
 #include <string>
 namespace cm {
 struct Observation {
@@ -30,10 +29,6 @@ struct RadialAnchor {
 constexpr int radialGridSize = 64;
 struct RadialLut {
   std::array<float, radialGridSize * radialGridSize * 2> values{};
-};
-constexpr int rbfGridSize = 65;
-struct RbfLut {
-  std::array<float, rbfGridSize * rbfGridSize * rbfGridSize * 3> values{};
 };
 struct Solution {
   bool valid = false;
@@ -63,7 +58,6 @@ SolveResult solve(const Capture &hero, const Capture &target,
                   const Geometry &geometry,
                   MatchMethod method = MatchMethod::Harmonic);
 RadialLut makeRadialLut(const Solution &solution);
-std::shared_ptr<const RbfLut> makeRbfLut(const Solution &solution);
 RGB transform(RGB encoded, const Solution &solution, const Amounts &amounts,
-              const RadialLut *lut = nullptr, const RbfLut *rbfLut = nullptr);
+              const RadialLut *lut = nullptr);
 } // namespace cm

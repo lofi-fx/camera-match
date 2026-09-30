@@ -8,7 +8,6 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
-#include <thread>
 #include <vector>
 using namespace cm;
 int main() {
@@ -231,7 +230,7 @@ int main() {
     assert(std::abs(zero.r - original.r) < 1e-6);
     Persistent savedRadial;
     savedRadial.hasHero = savedRadial.hasTarget = true;
-    hero.geometry.model = target.geometry.model = model;
+    hero.geometry = target.geometry = geo;
     for (auto &patch : hero.patch)
       patch.candidate = patch.valid;
     for (auto &patch : target.patch)
@@ -257,13 +256,6 @@ int main() {
     assert(reopened.solution.method == MatchMethod::RadialLegacy);
     auto rbf = solve(hero, target, geo, MatchMethod::Rbf);
     assert(rbf.solution.valid && rbf.solution.rbfCount >= 7);
-    // Resolve calls render on worker threads with much smaller stacks than main.
-    std::thread worker([&] {
-      auto lookup = makeRbfLut(rbf.solution);
-      assert(lookup && std::isfinite(lookup->values[0]));
-    });
-    worker.join();
-    auto rbfLut = makeRbfLut(rbf.solution);
     RGB source = encode(target.patch[chosen].rgb);
     RGB wanted = encode(hero.patch[chosen].rgb);
     Amounts rbfAmount{0, 0, 0, 0, false, 1};
@@ -291,32 +283,29 @@ int main() {
                            std::abs(neutralSource.g - neutralWanted.g) +
                            std::abs(neutralSource.b - neutralWanted.b);
     assert(neutralError < neutralBefore);
-    RGB lookup = transform(source, rbf.solution, rbfAmount, nullptr, rbfLut.get());
-    assert(std::abs(fitted.r - lookup.r) + std::abs(fitted.g - lookup.g) +
-               std::abs(fitted.b - lookup.b) < .06);
-    double worstLookupError = 0;
-    for (int ri = 0; ri <= 6; ++ri)
-      for (int gi = 0; gi <= 6; ++gi)
-        for (int bi = 0; bi <= 6; ++bi) {
-          RGB probe{.05 + .15 * ri, .05 + .15 * gi, .05 + .15 * bi};
-          RGB direct = transform(probe, rbf.solution, rbfAmount);
-          RGB gridded = transform(probe, rbf.solution, rbfAmount, nullptr,
-                                  rbfLut.get());
-          worstLookupError = std::max(
-              {worstLookupError, std::abs(direct.r - gridded.r),
-               std::abs(direct.g - gridded.g),
-               std::abs(direct.b - gridded.b)});
-        }
-    assert(worstLookupError < .01);
     RGB black = transform({0, 0, 0}, rbf.solution, rbfAmount);
     assert(std::abs(black.r) + std::abs(black.g) + std::abs(black.b) < .03);
     rbfAmount.biasWeight = 0;
-    RGB noRbf = transform(source, rbf.solution, rbfAmount, nullptr, rbfLut.get());
+    RGB noRbf = transform(source, rbf.solution, rbfAmount);
     assert(noRbf.r == source.r && noRbf.g == source.g && noRbf.b == source.b);
     savedRadial.solution = rbf.solution;
     assert(deserialize(serialize(savedRadial), reopened));
     assert(reopened.solution.method == MatchMethod::Rbf);
     assert(reopened.solution.rbfCount == rbf.solution.rbfCount);
+    Persistent oldRbf = savedRadial;
+    oldRbf.solution.rbfCenters[0] = {9, 9, 9};
+    std::string oldRbfBody = serialize(oldRbf);
+    oldRbfBody.resize(oldRbfBody.find_last_of(' '));
+    oldRbfBody.replace(0, 3, "CM4");
+    uint64_t oldRbfHash = 14695981039346656037ull;
+    for (unsigned char c : oldRbfBody) {
+      oldRbfHash ^= c;
+      oldRbfHash *= 1099511628211ull;
+    }
+    assert(deserialize(oldRbfBody + " " + std::to_string(oldRbfHash), reopened));
+    assert(reopened.solution.valid);
+    assert(std::abs(reopened.solution.rbfCenters[0].r -
+                    rbf.solution.rbfCenters[0].r) < 1e-10);
   }
   for (int rot = 0; rot < 4; rot++)
     for (bool mirror : {false, true}) {
@@ -366,16 +355,16 @@ int main() {
   auto unchanged = transform(near, local, localAmount, &localLut);
   assert(unchanged.r == near.r && unchanged.g == near.g &&
          unchanged.b == near.b);
-  // Golden values from Color Workspace's Python fit_rbf_model with the
-  // DWG/DI preset's support, regularization, and black anchor.
-  const std::array<RGB, 8> pythonSource = {{{.15, .20, .22},
-                                             {.30, .25, .20},
-                                             {.45, .38, .28},
-                                             {.62, .40, .30},
-                                             {.22, .48, .32},
-                                             {.38, .55, .46},
-                                             {.60, .60, .56},
-                                             {.72, .68, .64}}};
+  // Golden values from Color Workspace's linear DWG RBF fit with support
+  // 0.1, regularization 0.2, and a pinned black anchor.
+  const std::array<RGB, 8> pythonSource = {{{.06, .09, .11},
+                                             {.13, .10, .08},
+                                             {.25, .20, .12},
+                                             {.41, .21, .16},
+                                             {.10, .30, .17},
+                                             {.19, .38, .27},
+                                             {.45, .45, .41},
+                                             {.68, .62, .57}}};
   const std::array<RGB, 8> pythonDelta = {{{.01, -.005, .005},
                                             {.02, 0, -.01},
                                             {.03, .01, .015},
@@ -387,53 +376,34 @@ int main() {
   Geometry pythonGeometry;
   Capture pythonHero, pythonTarget;
   for (int j = 0; j < 8; ++j) {
-    pythonTarget.patch[j].rgb = decode(pythonSource[j]);
-    pythonHero.patch[j].rgb = decode(pythonSource[j] + pythonDelta[j]);
+    pythonTarget.patch[j].rgb = pythonSource[j];
+    pythonHero.patch[j].rgb = pythonSource[j] + pythonDelta[j];
     pythonTarget.patch[j].valid = pythonHero.patch[j].valid = 100;
   }
   auto pythonFit = solve(pythonHero, pythonTarget, pythonGeometry,
                          MatchMethod::Rbf);
   assert(pythonFit.solution.valid && pythonFit.solution.rbfCount == 9);
-  const std::array<RGB, 4> probes = {{{.2, .3, .4},
-                                       {.45, .42, .35},
-                                       {.65, .57, .5},
-                                       {0, 0, 0}}};
-  const std::array<RGB, 4> expected = {{{.209813374562, .278988735824,
-                                          .401763688336},
-                                         {.469776315979, .425905522436,
-                                          .359464214851},
-                                         {.669459286823, .574871396064,
-                                          .508043512551},
-                                         {.001272684036, -.000267901954,
-                                          -.000385090074}}};
+  const std::array<RGB, 5> probes = {{{.1, .15, .2},
+                                      {.30, .27, .2},
+                                      {.55, .48, .4},
+                                      {0, 0, 0},
+                                      {4, 3.5, 3}}};
+  const std::array<RGB, 5> expected = {{{.284213849600, .307378601250,
+                                          .348704017249},
+                                         {.393140501259, .381308364888,
+                                          .350352122631},
+                                         {.454638464039, .439115853170,
+                                          .420696345754},
+                                         {.015184793963, -.000338001098,
+                                          .000227725077},
+                                         {.661410596214, .647692416095,
+                                          .631981052996}}};
   for (size_t j = 0; j < probes.size(); ++j) {
-    RGB actual = transform(probes[j], pythonFit.solution,
+    RGB actual = transform(encode(probes[j]), pythonFit.solution,
                            Amounts{0, 0, 0, 0, false, 1});
     assert(std::abs(actual.r - expected[j].r) < 1e-5);
     assert(std::abs(actual.g - expected[j].g) < 1e-5);
     assert(std::abs(actual.b - expected[j].b) < 1e-5);
   }
-  Solution boundary;
-  boundary.valid = true;
-  boundary.method = MatchMethod::Rbf;
-  boundary.rbfCount = 1;
-  boundary.rbfSupport = .1;
-  boundary.rbfCenters[0] = {.98, .4, .3};
-  boundary.rbfWeights[0] = {.08, -.03, .02};
-  boundary.rbfAffine[1] = {1, 0, 0};
-  boundary.rbfAffine[2] = {0, 1, 0};
-  boundary.rbfAffine[3] = {0, 0, 1};
-  auto boundaryLut = makeRbfLut(boundary);
-  Amounts fullRbf{0, 0, 0, 0, false, 1};
-  RGB inside = transform({1. - 1e-5, .4, .3}, boundary, fullRbf,
-                         nullptr, boundaryLut.get());
-  RGB outside = transform({1. + 1e-5, .4, .3}, boundary, fullRbf,
-                          nullptr, boundaryLut.get());
-  assert(std::abs(inside.r - outside.r) < 1e-3);
-  assert(std::abs(inside.g - outside.g) < 1e-3);
-  assert(std::abs(inside.b - outside.b) < 1e-3);
-  RGB farOutside = transform({1.1, .4, .3}, boundary, fullRbf,
-                             nullptr, boundaryLut.get());
-  assert(std::abs(farOutside.r - 1.1) > .01);
   std::cout << "core checks passed\n";
 }
