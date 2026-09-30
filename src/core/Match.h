@@ -22,13 +22,17 @@ struct Capture {
   std::array<int, 4> bounds{};
   double scaleX = 1, scaleY = 1, par = 1;
 };
-enum class MatchMethod { Harmonic = 0, Radial = 1 };
+enum class MatchMethod { Harmonic = 0, RadialLegacy = 1, Rbf = 2 };
 struct RadialAnchor {
   double x = 0, y = 0, hue = 0, saturation = 0, weight = 0;
 };
 constexpr int radialGridSize = 64;
 struct RadialLut {
   std::array<float, radialGridSize * radialGridSize * 2> values{};
+};
+constexpr int rbfGridSize = 33;
+struct RbfLut {
+  std::array<float, rbfGridSize * rbfGridSize * rbfGridSize * 3> values{};
 };
 struct Solution {
   bool valid = false;
@@ -38,6 +42,10 @@ struct Solution {
   MatchMethod method = MatchMethod::Harmonic;
   std::array<RadialAnchor, 32> radial{};
   int radialCount = 0;
+  std::array<RGB, 32> rbfCenters{}, rbfWeights{};
+  std::array<RGB, 4> rbfAffine{};
+  int rbfCount = 0;
+  double rbfSupport = 0;
   int neutralCount = 0, colorCount = 0;
   double exposureMAD = 0;
 };
@@ -54,6 +62,7 @@ SolveResult solve(const Capture &hero, const Capture &target,
                   const Geometry &geometry,
                   MatchMethod method = MatchMethod::Harmonic);
 RadialLut makeRadialLut(const Solution &solution);
+RbfLut makeRbfLut(const Solution &solution);
 RGB transform(RGB encoded, const Solution &solution, const Amounts &amounts,
-              const RadialLut *lut = nullptr);
+              const RadialLut *lut = nullptr, const RbfLut *rbfLut = nullptr);
 } // namespace cm

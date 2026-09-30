@@ -72,7 +72,7 @@ static bool readCapture(std::istream &i, Capture &c) {
 }
 std::string serialize(const Persistent &s) {
   std::ostringstream o;
-  o << std::setprecision(17) << "CM3 " << s.hasHero << ' ' << s.hasTarget
+  o << std::setprecision(17) << "CM4 " << s.hasHero << ' ' << s.hasTarget
     << ' ';
   writeCapture(o, s.hero);
   writeCapture(o, s.target);
@@ -90,6 +90,14 @@ std::string serialize(const Persistent &s) {
     o << ' ' << a.x << ' ' << a.y << ' ' << a.hue << ' ' << a.saturation
       << ' ' << a.weight;
   }
+  o << ' ' << x.rbfCount << ' ' << x.rbfSupport;
+  for (int j = 0; j < x.rbfCount; ++j) {
+    auto c = x.rbfCenters[j], w = x.rbfWeights[j];
+    o << ' ' << c.r << ' ' << c.g << ' ' << c.b << ' ' << w.r << ' ' << w.g
+      << ' ' << w.b;
+  }
+  for (auto v : x.rbfAffine)
+    o << ' ' << v.r << ' ' << v.g << ' ' << v.b;
   std::string body = o.str();
   std::ostringstream result;
   result << body << ' ' << hash(body);
@@ -112,7 +120,8 @@ bool deserialize(const std::string &str, Persistent &out) {
   std::string tag;
   Persistent s;
   int hero = 0, target = 0, valid = 0;
-  if (!(i >> tag >> hero >> target) || (tag != "CM2" && tag != "CM3") ||
+  if (!(i >> tag >> hero >> target) ||
+      (tag != "CM2" && tag != "CM3" && tag != "CM4") ||
       hero < 0 || hero > 1 ||
       target < 0 || target > 1 || !readCapture(i, s.hero) ||
       !readCapture(i, s.target))
@@ -129,9 +138,10 @@ bool deserialize(const std::string &str, Persistent &out) {
       return false;
   if (!(i >> x.neutralCount >> x.colorCount >> x.exposureMAD))
     return false;
-  if (tag == "CM3") {
+  if (tag == "CM3" || tag == "CM4") {
     int method = 0;
-    if (!(i >> method >> x.radialCount) || method < 0 || method > 1 ||
+    if (!(i >> method >> x.radialCount) || method < 0 ||
+        method > (tag == "CM4" ? 2 : 1) ||
         x.radialCount < 0 || x.radialCount > int(x.radial.size()))
       return false;
     x.method = MatchMethod(method);
@@ -143,6 +153,24 @@ bool deserialize(const std::string &str, Persistent &out) {
           !std::isfinite(a.weight) || a.weight < 0 || a.weight > 1)
         return false;
     }
+  }
+  if (tag == "CM4") {
+    if (!(i >> x.rbfCount >> x.rbfSupport) || x.rbfCount < 0 ||
+        x.rbfCount > int(x.rbfCenters.size()) ||
+        !std::isfinite(x.rbfSupport))
+      return false;
+    for (int j = 0; j < x.rbfCount; ++j) {
+      auto &c = x.rbfCenters[j], &w = x.rbfWeights[j];
+      if (!(i >> c.r >> c.g >> c.b >> w.r >> w.g >> w.b) ||
+          !finite(c) || !finite(w))
+        return false;
+    }
+    for (auto &v : x.rbfAffine)
+      if (!(i >> v.r >> v.g >> v.b) || !finite(v))
+        return false;
+    if (x.method == MatchMethod::Rbf &&
+        (x.rbfCount < 7 || x.rbfSupport <= 0))
+      return false;
   }
   std::string extra;
   if (i >> extra)

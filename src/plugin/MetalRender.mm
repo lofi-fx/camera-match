@@ -1,6 +1,7 @@
 #import <Metal/Metal.h>
 #include "MetalRender.h"
 #include <mutex>
+#include <vector>
 
 namespace cm {
 namespace {
@@ -62,8 +63,33 @@ float2 radial(float2 chroma, device const float2 *lut) {
   float2 v01 = lut[b.y * 64 + a.x], v11 = lut[b.y * 64 + b.x];
   return mix(mix(v00, v10, t.x), mix(v01, v11, t.x), t.y);
 }
-float3 match(float3 input, constant Params &p, device const float2 *lut) {
+float3 rbf(float3 input, device const float *lut) {
+  float3 q = (input + .25f) * (32.f / 1.75f);
+  if (any(q < 0.f) || any(q > 32.f)) return input;
+  int3 a = int3(q), b = min(a + 1, int3(32));
+  float3 t = q - float3(a);
+  float3 v = float3(0.f);
+  for (int mask=0; mask<8; ++mask) {
+    int ri = mask & 1 ? b.x : a.x;
+    int gi = mask & 2 ? b.y : a.y;
+    int bi = mask & 4 ? b.z : a.z;
+    float w = (mask & 1 ? t.x : 1.f-t.x) *
+              (mask & 2 ? t.y : 1.f-t.y) *
+              (mask & 4 ? t.z : 1.f-t.z);
+    int index = ((ri*33+gi)*33+bi)*3;
+    v += float3(lut[index],lut[index+1],lut[index+2]) * w;
+  }
+  return v;
+}
+float3 match(float3 input, constant Params &p, device const float2 *lut,
+             device const float *rbfLut) {
   if (!all(isfinite(input))) return input;
+  if (p.method == 2) {
+    if (p.biasWeight <= 0.f) return input;
+    float3 matched = rbf(input, rbfLut);
+    float3 out = input + clamp(p.biasWeight,0.f,2.f)*(matched-input);
+    return all(isfinite(out)) ? out : input;
+  }
   float3 x = decodeDI(input);
   float y = luma(x);
   if (p.neutralAmount > 0.f && y > 1e-7f) {
@@ -103,6 +129,7 @@ kernel void cameraMatch(device const float *src [[buffer(0)]],
                         device float *dst [[buffer(1)]],
                         constant Params &p [[buffer(2)]],
                         device const float2 *lut [[buffer(3)]],
+                        device const float *rbfLut [[buffer(4)]],
                         uint2 tid [[thread_position_in_grid]]) {
   if (tid.x >= uint(p.winW) || tid.y >= uint(p.winH)) return;
   int x = p.winX + int(tid.x), y = p.winY + int(tid.y);
@@ -120,7 +147,7 @@ kernel void cameraMatch(device const float *src [[buffer(0)]],
   float alpha = p.srcComponents == 4 ? src[si+3] : 1.f;
   float3 rgb = float3(src[si],src[si+1],src[si+2]);
   if (p.srcPremult && alpha > 1e-6f) rgb /= alpha;
-  float3 out = match(rgb,p,lut);
+  float3 out = match(rgb,p,lut,rbfLut);
   if (p.dstPremult) out *= alpha;
   dst[di]=out.x; dst[di+1]=out.y; dst[di+2]=out.z;
   if (p.dstComponents == 4) dst[di+3]=alpha;
@@ -130,10 +157,38 @@ kernel void cameraMatch(device const float *src [[buffer(0)]],
 std::mutex pipelineMutex;
 id<MTLDevice> pipelineDevice = nil;
 id<MTLComputePipelineState> pipeline = nil;
+struct RbfBufferEntry {
+  std::weak_ptr<const RbfLut> source;
+  id<MTLDevice> device;
+  id<MTLBuffer> buffer;
+};
+std::mutex rbfBufferMutex;
+std::vector<RbfBufferEntry> rbfBuffers;
+id<MTLBuffer> cachedRbfBuffer(id<MTLDevice> device,
+                              const std::shared_ptr<const RbfLut> &lut) {
+  std::lock_guard<std::mutex> lock(rbfBufferMutex);
+  for (auto it = rbfBuffers.begin(); it != rbfBuffers.end();) {
+    if (it->source.expired()) {
+      [it->buffer release];
+      it = rbfBuffers.erase(it);
+    } else {
+      if (it->device == device && it->source.lock() == lut)
+        return it->buffer;
+      ++it;
+    }
+  }
+  id<MTLBuffer> buffer = [device newBufferWithBytes:lut->values.data()
+                                               length:sizeof(lut->values)
+                                              options:MTLResourceStorageModeShared];
+  if (buffer)
+    rbfBuffers.push_back({lut, device, buffer});
+  return buffer;
+}
 }
 
 bool renderMetal(void *queuePtr, void *source, void *output,
-                 const MetalParams &p, const RadialLut *lut) {
+                 const MetalParams &p, const RadialLut *lut,
+                 std::shared_ptr<const RbfLut> rbfLut) {
   @autoreleasepool {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLBuffer> src = (__bridge id<MTLBuffer>)source;
@@ -167,22 +222,36 @@ bool renderMetal(void *queuePtr, void *source, void *output,
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     if (!command || !encoder) return false;
     float empty[2]{};
-    id<MTLBuffer> radialBuffer = [queue.device
-        newBufferWithBytes:lut ? lut->values.data() : empty
-                  length:lut ? sizeof(lut->values) : sizeof(empty)
-                 options:MTLResourceStorageModeShared];
-    if (!radialBuffer) return false;
+    id<MTLBuffer> rbfBuffer = rbfLut
+        ? cachedRbfBuffer(queue.device, rbfLut)
+        : [queue.device newBufferWithBytes:empty length:sizeof(empty)
+                                  options:MTLResourceStorageModeShared];
+    if (!rbfBuffer) return false;
+    id<MTLBuffer> radialBuffer = lut
+        ? [queue.device newBufferWithBytes:lut->values.data()
+                                   length:sizeof(lut->values)
+                                  options:MTLResourceStorageModeShared]
+        : rbfBuffer;
+    if (!radialBuffer) {
+      if (!rbfLut) [rbfBuffer release];
+      return false;
+    }
     [encoder setComputePipelineState:current];
     [encoder setBuffer:src offset:0 atIndex:0];
     [encoder setBuffer:dst offset:0 atIndex:1];
     [encoder setBytes:&p length:sizeof(p) atIndex:2];
     [encoder setBuffer:radialBuffer offset:0 atIndex:3];
+    [encoder setBuffer:rbfBuffer offset:0 atIndex:4];
     NSUInteger width = current.threadExecutionWidth;
     NSUInteger height = std::max<NSUInteger>(1, current.maxTotalThreadsPerThreadgroup / width);
     [encoder dispatchThreads:MTLSizeMake(p.winW,p.winH,1)
       threadsPerThreadgroup:MTLSizeMake(width,height,1)];
     [encoder endEncoding];
     [command commit];
+    if (lut)
+      [radialBuffer release];
+    if (!rbfLut)
+      [rbfBuffer release];
     return true;
   }
 }

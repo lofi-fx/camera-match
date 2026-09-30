@@ -60,8 +60,8 @@ int main() {
   assert(restored.hero.name == "Hero A" && restored.hero.revision == 7);
   std::string oldBody = serialize(received);
   oldBody.resize(oldBody.find_last_of(' '));
-  assert(oldBody.substr(oldBody.size() - 4) == " 0 0");
-  oldBody.resize(oldBody.size() - 4);
+  for (int j = 0; j < 16; ++j)
+    oldBody.resize(oldBody.find_last_of(' '));
   oldBody.replace(0, 3, "CM2");
   uint64_t oldHash = 14695981039346656037ull;
   for (unsigned char c : oldBody) {
@@ -71,6 +71,19 @@ int main() {
   Persistent legacy;
   assert(deserialize(oldBody + " " + std::to_string(oldHash), legacy));
   assert(legacy.solution.method == MatchMethod::Harmonic);
+  std::string cm3Body = serialize(received);
+  cm3Body.resize(cm3Body.find_last_of(' '));
+  for (int j = 0; j < 14; ++j)
+    cm3Body.resize(cm3Body.find_last_of(' '));
+  cm3Body.replace(0, 3, "CM3");
+  uint64_t cm3Hash = 14695981039346656037ull;
+  for (unsigned char c : cm3Body) {
+    cm3Hash ^= c;
+    cm3Hash *= 1099511628211ull;
+  }
+  Persistent prior;
+  assert(deserialize(cm3Body + " " + std::to_string(cm3Hash), prior));
+  assert(prior.solution.method == MatchMethod::Harmonic);
   Persistent p;
   p.hasHero = true;
   p.hero.name = "Test hero";
@@ -187,7 +200,7 @@ int main() {
     double chroma = std::hypot(shifted.a, shifted.b);
     hero.patch[chosen].rgb = fromOklab(
         {shifted.L, chroma * std::cos(angle), chroma * std::sin(angle)});
-    auto radial = solve(hero, target, geo, MatchMethod::Radial);
+    auto radial = solve(hero, target, geo, MatchMethod::RadialLegacy);
     assert(radial.solution.valid && radial.solution.radialCount >= 4);
     auto harmonic = solve(hero, target, geo, MatchMethod::Harmonic);
     assert(harmonic.solution.valid);
@@ -221,8 +234,60 @@ int main() {
     savedRadial.solution = radial.solution;
     Persistent reopened;
     assert(deserialize(serialize(savedRadial), reopened));
-    assert(reopened.solution.method == MatchMethod::Radial);
+    assert(reopened.solution.method == MatchMethod::RadialLegacy);
     assert(reopened.solution.radialCount == radial.solution.radialCount);
+    std::string legacyRadial = serialize(savedRadial);
+    legacyRadial.resize(legacyRadial.find_last_of(' '));
+    for (int j = 0; j < 14; ++j)
+      legacyRadial.resize(legacyRadial.find_last_of(' '));
+    legacyRadial.replace(0, 3, "CM3");
+    uint64_t checksum = 14695981039346656037ull;
+    for (unsigned char c : legacyRadial) {
+      checksum ^= c;
+      checksum *= 1099511628211ull;
+    }
+    assert(deserialize(legacyRadial + " " + std::to_string(checksum), reopened));
+    assert(reopened.solution.method == MatchMethod::RadialLegacy);
+    auto rbf = solve(hero, target, geo, MatchMethod::Rbf);
+    assert(rbf.solution.valid && rbf.solution.rbfCount >= 7);
+    auto rbfLut = makeRbfLut(rbf.solution);
+    RGB source = encode(target.patch[chosen].rgb);
+    RGB wanted = encode(hero.patch[chosen].rgb);
+    Amounts rbfAmount{0, 0, 0, 0, false, 1};
+    RGB fitted = transform(source, rbf.solution, rbfAmount);
+    double fittedError = std::abs(fitted.r - wanted.r) +
+                         std::abs(fitted.g - wanted.g) +
+                         std::abs(fitted.b - wanted.b);
+    double originalError = std::abs(source.r - wanted.r) +
+                           std::abs(source.g - wanted.g) +
+                           std::abs(source.b - wanted.b);
+    assert(fittedError < originalError);
+    size_t neutralPatch = 0;
+    while (neutralPatch < layout(model).size() &&
+           (!geo.included[neutralPatch] ||
+            layout(model)[neutralPatch].role != Role::Neutral))
+      ++neutralPatch;
+    assert(neutralPatch < layout(model).size());
+    RGB neutralSource = encode(target.patch[neutralPatch].rgb);
+    RGB neutralWanted = encode(hero.patch[neutralPatch].rgb);
+    RGB neutralFitted = transform(neutralSource, rbf.solution, rbfAmount);
+    double neutralError = std::abs(neutralFitted.r - neutralWanted.r) +
+                          std::abs(neutralFitted.g - neutralWanted.g) +
+                          std::abs(neutralFitted.b - neutralWanted.b);
+    double neutralBefore = std::abs(neutralSource.r - neutralWanted.r) +
+                           std::abs(neutralSource.g - neutralWanted.g) +
+                           std::abs(neutralSource.b - neutralWanted.b);
+    assert(neutralError < neutralBefore);
+    RGB lookup = transform(source, rbf.solution, rbfAmount, nullptr, &rbfLut);
+    assert(std::abs(fitted.r - lookup.r) + std::abs(fitted.g - lookup.g) +
+               std::abs(fitted.b - lookup.b) < .06);
+    rbfAmount.biasWeight = 0;
+    RGB noRbf = transform(source, rbf.solution, rbfAmount, nullptr, &rbfLut);
+    assert(noRbf.r == source.r && noRbf.g == source.g && noRbf.b == source.b);
+    savedRadial.solution = rbf.solution;
+    assert(deserialize(serialize(savedRadial), reopened));
+    assert(reopened.solution.method == MatchMethod::Rbf);
+    assert(reopened.solution.rbfCount == rbf.solution.rbfCount);
   }
   for (int rot = 0; rot < 4; rot++)
     for (bool mirror : {false, true}) {
@@ -254,7 +319,7 @@ int main() {
   }
   Solution local;
   local.valid = true;
-  local.method = MatchMethod::Radial;
+  local.method = MatchMethod::RadialLegacy;
   local.radialCount = 1;
   local.radial[0] = {.2, .0833333333, .2, 0, 1};
   auto localLut = makeRadialLut(local);

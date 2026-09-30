@@ -57,6 +57,101 @@ static bool regress(const std::vector<std::array<double, 5>> &rows,
     out[i] = a[i][3];
   return true;
 }
+static double distance(RGB a, RGB b) {
+  return std::sqrt((a.r - b.r) * (a.r - b.r) +
+                   (a.g - b.g) * (a.g - b.g) +
+                   (a.b - b.b) * (a.b - b.b));
+}
+static RGB evaluateRbf(const Solution &s, RGB x) {
+  RGB out = s.rbfAffine[0] + s.rbfAffine[1] * x.r +
+            s.rbfAffine[2] * x.g + s.rbfAffine[3] * x.b;
+  for (int j = 0; j < s.rbfCount; ++j) {
+    double r = distance(x, s.rbfCenters[j]) / s.rbfSupport;
+    out = out + s.rbfWeights[j] * std::exp(-r * r);
+  }
+  return finite(out) ? out : x;
+}
+static SolveResult solveRbf(const Capture &hero, const Capture &target,
+                            const Geometry &geo) {
+  SolveResult result;
+  auto &s = result.solution;
+  s.method = MatchMethod::Rbf;
+  const auto &patches = layout(geo.model);
+  for (size_t j = 0; j < patches.size(); ++j) {
+    if (!geo.included[j] || hero.patch[j].valid < 16 ||
+        target.patch[j].valid < 16)
+      continue;
+    RGB a = encode(target.patch[j].rgb), b = encode(hero.patch[j].rgb);
+    if (!finite(a) || !finite(b))
+      continue;
+    int index = s.rbfCount++;
+    s.rbfCenters[index] = a;
+    s.rbfWeights[index] = b; // Desired outputs until the linear solve finishes.
+    if (patches[j].role == Role::Neutral)
+      ++s.neutralCount;
+    else
+      ++s.colorCount;
+  }
+  int n = s.rbfCount;
+  if (n < 7) {
+    result.error = "RBF needs at least seven usable chart patches";
+    return result;
+  }
+  std::vector<double> distances;
+  for (int i = 0; i < n; ++i)
+    for (int j = i + 1; j < n; ++j) {
+      double d = distance(s.rbfCenters[i], s.rbfCenters[j]);
+      if (d > 1e-8)
+        distances.push_back(d);
+    }
+  s.rbfSupport = clamp(median(distances) * 1.5, .01, 2.);
+  int size = n + 4;
+  std::vector<std::vector<double>> a(size, std::vector<double>(size + 3));
+  for (int i = 0; i < n; ++i) {
+    RGB x = s.rbfCenters[i], y = s.rbfWeights[i];
+    for (int j = 0; j < n; ++j) {
+      double r = distance(x, s.rbfCenters[j]) / s.rbfSupport;
+      a[i][j] = std::exp(-r * r);
+    }
+    a[i][i] += .001;
+    double p[4] = {1, x.r, x.g, x.b};
+    for (int j = 0; j < 4; ++j)
+      a[i][n + j] = a[n + j][i] = p[j];
+    a[i][size] = y.r;
+    a[i][size + 1] = y.g;
+    a[i][size + 2] = y.b;
+  }
+  for (int j = 0; j < 4; ++j)
+    a[n + j][n + j] = -1e-7;
+  for (int col = 0; col < size; ++col) {
+    int pivot = col;
+    for (int row = col + 1; row < size; ++row)
+      if (std::abs(a[row][col]) > std::abs(a[pivot][col]))
+        pivot = row;
+    if (std::abs(a[pivot][col]) < 1e-12) {
+      result.error = "RBF fit is unstable; select more distinct patches";
+      return result;
+    }
+    std::swap(a[col], a[pivot]);
+    double divisor = a[col][col];
+    for (int k = col; k < size + 3; ++k)
+      a[col][k] /= divisor;
+    for (int row = 0; row < size; ++row) {
+      if (row == col)
+        continue;
+      double factor = a[row][col];
+      for (int k = col; k < size + 3; ++k)
+        a[row][k] -= factor * a[col][k];
+    }
+  }
+  for (int i = 0; i < n; ++i)
+    s.rbfWeights[i] = {a[i][size], a[i][size + 1], a[i][size + 2]};
+  for (int i = 0; i < 4; ++i)
+    s.rbfAffine[i] = {a[n + i][size], a[n + i][size + 1],
+                      a[n + i][size + 2]};
+  s.valid = true;
+  return result;
+}
 SolveResult solve(const Capture &hero, const Capture &target,
                   const Geometry &geo, MatchMethod method) {
   SolveResult result;
@@ -64,6 +159,8 @@ SolveResult solve(const Capture &hero, const Capture &target,
     result.error = "Hero and target chart models differ";
     return result;
   }
+  if (method == MatchMethod::Rbf)
+    return solveRbf(hero, target, geo);
   auto &p = layout(hero.chartModel);
   std::vector<double> stops, rr, gg, bb;
   for (size_t i = 0; i < p.size(); i++) {
@@ -123,7 +220,7 @@ SolveResult solve(const Capture &hero, const Capture &target,
     double w = clamp(std::min(a.valid, b.valid) / 100., .2, 1.);
     if (p[i].role == Role::Skin)
       w *= .6;
-    if (method == MatchMethod::Radial && s.radialCount < int(s.radial.size()))
+    if (method == MatchMethod::RadialLegacy && s.radialCount < int(s.radial.size()))
       s.radial[s.radialCount++] = {lb.a / lb.L, lb.b / lb.L,
                                    clamp(dh, -M_PI / 6, M_PI / 6),
                                    clamp(ds, -std::log(2.), std::log(2.)), w};
@@ -136,7 +233,7 @@ SolveResult solve(const Capture &hero, const Capture &target,
   int sectorCount = 0;
   for (bool v : sectors)
     sectorCount += v;
-  if (method == MatchMethod::Radial && hr.size() >= 4 && sectorCount >= 4) {
+  if (method == MatchMethod::RadialLegacy && hr.size() >= 4 && sectorCount >= 4) {
     s.valid = true;
   } else if (method == MatchMethod::Harmonic && hr.size() >= 4 &&
              sectorCount >= 4 && regress(hr, s.hue) &&
@@ -195,6 +292,49 @@ RadialLut makeRadialLut(const Solution &s) {
     }
   return lut;
 }
+constexpr double rbfMin = -.25, rbfMax = 1.5;
+RbfLut makeRbfLut(const Solution &s) {
+  RbfLut lut;
+  for (int r = 0; r < rbfGridSize; ++r)
+    for (int g = 0; g < rbfGridSize; ++g)
+      for (int b = 0; b < rbfGridSize; ++b) {
+        RGB x{rbfMin + (rbfMax - rbfMin) * r / (rbfGridSize - 1),
+              rbfMin + (rbfMax - rbfMin) * g / (rbfGridSize - 1),
+              rbfMin + (rbfMax - rbfMin) * b / (rbfGridSize - 1)};
+        RGB y = evaluateRbf(s, x);
+        int i = ((r * rbfGridSize + g) * rbfGridSize + b) * 3;
+        lut.values[i] = float(y.r);
+        lut.values[i + 1] = float(y.g);
+        lut.values[i + 2] = float(y.b);
+      }
+  return lut;
+}
+static RGB sampleRbf(const RbfLut &lut, RGB x) {
+  auto coordinate = [](double v) {
+    return (v - rbfMin) * (rbfGridSize - 1) / (rbfMax - rbfMin);
+  };
+  double p[3] = {coordinate(x.r), coordinate(x.g), coordinate(x.b)};
+  for (double v : p)
+    if (v < 0 || v > rbfGridSize - 1)
+      return x;
+  int lo[3] = {int(p[0]), int(p[1]), int(p[2])};
+  int hi[3] = {std::min(lo[0] + 1, rbfGridSize - 1),
+               std::min(lo[1] + 1, rbfGridSize - 1),
+               std::min(lo[2] + 1, rbfGridSize - 1)};
+  double t[3] = {p[0] - lo[0], p[1] - lo[1], p[2] - lo[2]};
+  RGB y{};
+  for (int mask = 0; mask < 8; ++mask) {
+    int r = mask & 1 ? hi[0] : lo[0];
+    int g = mask & 2 ? hi[1] : lo[1];
+    int b = mask & 4 ? hi[2] : lo[2];
+    double w = (mask & 1 ? t[0] : 1 - t[0]) *
+               (mask & 2 ? t[1] : 1 - t[1]) *
+               (mask & 4 ? t[2] : 1 - t[2]);
+    int i = ((r * rbfGridSize + g) * rbfGridSize + b) * 3;
+    y = y + RGB{lut.values[i], lut.values[i + 1], lut.values[i + 2]} * w;
+  }
+  return y;
+}
 static std::array<double, 2> sampleRadial(const RadialLut &lut, double x,
                                           double y) {
   double gx = clamp((x + 1) * .5 * (radialGridSize - 1), 0,
@@ -216,10 +356,17 @@ static std::array<double, 2> sampleRadial(const RadialLut &lut, double x,
   return result;
 }
 RGB transform(RGB input, const Solution &s, const Amounts &a,
-              const RadialLut *lut) {
+              const RadialLut *lut, const RbfLut *rbfLut) {
+  if (s.method == MatchMethod::Rbf) {
+    if (a.bypass || !s.valid || !finite(input) || a.biasWeight <= 0)
+      return input;
+    RGB matched = rbfLut ? sampleRbf(*rbfLut, input) : evaluateRbf(s, input);
+    RGB out = input + (matched - input) * clamp(a.biasWeight, 0, 2);
+    return finite(out) ? out : input;
+  }
   if (a.bypass || !s.valid ||
       (((a.hue == 0 && a.sat == 0) ||
-        (s.method == MatchMethod::Radial && a.biasWeight == 0)) &&
+        (s.method == MatchMethod::RadialLegacy && a.biasWeight == 0)) &&
        a.exposure == 0 && a.neutral == 0) ||
       !finite(input))
     return input;
@@ -228,14 +375,14 @@ RGB transform(RGB input, const Solution &s, const Amounts &a,
   if (a.neutral > 0 && y > 1e-7)
     x = neutral(x, s.neutralLog, clamp(a.neutral, 0, 1));
   if ((a.hue > 0 || a.sat > 0) &&
-      (s.method != MatchMethod::Radial || a.biasWeight > 0) && y > 1e-6) {
+      (s.method != MatchMethod::RadialLegacy || a.biasWeight > 0) && y > 1e-6) {
     Lab l = toOklab(x);
     double c = std::hypot(l.a, l.b);
     if (l.L > 1e-5 && c / l.L > .005) {
       double h = std::atan2(l.b, l.a),
              dh = s.hue[0] + s.hue[1] * std::sin(h) + s.hue[2] * std::cos(h),
              ds = s.sat[0] + s.sat[1] * std::sin(h) + s.sat[2] * std::cos(h);
-      if (s.method == MatchMethod::Radial) {
+      if (s.method == MatchMethod::RadialLegacy) {
         auto v = lut ? sampleRadial(*lut, l.a / l.L, l.b / l.L)
                      : radialAt(s, l.a / l.L, l.b / l.L);
         dh = v[0] * clamp(a.biasWeight, 0, 2);

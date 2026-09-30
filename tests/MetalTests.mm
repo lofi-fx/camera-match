@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <memory>
 
 using namespace cm;
 int main() {
@@ -68,7 +69,7 @@ int main() {
       assert(output[i + 3] == .5f);
     }
     assert(maxError < .003);
-    solution.method = MatchMethod::Radial;
+    solution.method = MatchMethod::RadialLegacy;
     solution.radialCount = 1;
     solution.radial[0] = {.15, .12, .12, .2, 1};
     auto lut = makeRadialLut(solution);
@@ -85,6 +86,35 @@ int main() {
     for (int i = 0; i < count; i += 4) {
       RGB expected = transform({input[i], input[i + 1], input[i + 2]},
                                solution, amount, &lut);
+      maxError = std::max({maxError, std::abs(output[i] - expected.r),
+                           std::abs(output[i + 1] - expected.g),
+                           std::abs(output[i + 2] - expected.b)});
+    }
+    assert(maxError < .003);
+    solution = {};
+    solution.valid = true;
+    solution.method = MatchMethod::Rbf;
+    solution.rbfCount = 1;
+    solution.rbfSupport = .4;
+    solution.rbfCenters[0] = {.5, .5, .5};
+    solution.rbfWeights[0] = {.05, 0, -.04};
+    solution.rbfAffine[1] = {1, 0, 0};
+    solution.rbfAffine[2] = {0, 1, 0};
+    solution.rbfAffine[3] = {0, 0, 1};
+    auto rbfLut = std::make_shared<RbfLut>(makeRbfLut(solution));
+    p.method = 2;
+    p.biasWeight = 1.2f;
+    amount.biasWeight = 1.2;
+    assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
+                       (__bridge void *)dst, p, nullptr, rbfLut));
+    fence = [queue commandBuffer];
+    [fence commit];
+    [fence waitUntilCompleted];
+    assert(fence.status == MTLCommandBufferStatusCompleted);
+    maxError = 0;
+    for (int i = 0; i < count; i += 4) {
+      RGB expected = transform({input[i], input[i + 1], input[i + 2]},
+                               solution, amount, nullptr, rbfLut.get());
       maxError = std::max({maxError, std::abs(output[i] - expected.r),
                            std::abs(output[i + 1] - expected.g),
                            std::abs(output[i + 2] - expected.b)});
