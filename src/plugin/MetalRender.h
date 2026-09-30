@@ -6,6 +6,7 @@
 namespace cm {
 struct alignas(16) MetalParams {
   float hue[4], sat[4], neutral[4];
+  float rbfSlope[3][4];
   float stops, hueAmount, satAmount, exposureAmount;
   float neutralAmount;
   float biasWeight;

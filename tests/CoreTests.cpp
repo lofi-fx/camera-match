@@ -413,5 +413,27 @@ int main() {
     assert(std::abs(actual.g - expected[j].g) < 1e-5);
     assert(std::abs(actual.b - expected[j].b) < 1e-5);
   }
+  Solution boundary;
+  boundary.valid = true;
+  boundary.method = MatchMethod::Rbf;
+  boundary.rbfCount = 1;
+  boundary.rbfSupport = .1;
+  boundary.rbfCenters[0] = {.98, .4, .3};
+  boundary.rbfWeights[0] = {.08, -.03, .02};
+  boundary.rbfAffine[1] = {1, 0, 0};
+  boundary.rbfAffine[2] = {0, 1, 0};
+  boundary.rbfAffine[3] = {0, 0, 1};
+  auto boundaryLut = makeRbfLut(boundary);
+  Amounts fullRbf{0, 0, 0, 0, false, 1};
+  RGB inside = transform({1. - 1e-5, .4, .3}, boundary, fullRbf,
+                         nullptr, boundaryLut.get());
+  RGB outside = transform({1. + 1e-5, .4, .3}, boundary, fullRbf,
+                          nullptr, boundaryLut.get());
+  assert(std::abs(inside.r - outside.r) < 1e-3);
+  assert(std::abs(inside.g - outside.g) < 1e-3);
+  assert(std::abs(inside.b - outside.b) < 1e-3);
+  RGB farOutside = transform({1.1, .4, .3}, boundary, fullRbf,
+                             nullptr, boundaryLut.get());
+  assert(std::abs(farOutside.r - 1.1) > .01);
   std::cout << "core checks passed\n";
 }

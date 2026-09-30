@@ -10,6 +10,7 @@ constexpr const char *shader = R"METAL(
 using namespace metal;
 struct Params {
   float4 hue, sat, neutral;
+  float4 rbfSlope[3];
   float stops, hueAmount, satAmount, exposureAmount;
   float neutralAmount;
   float biasWeight;
@@ -63,9 +64,9 @@ float2 radial(float2 chroma, device const float2 *lut) {
   float2 v01 = lut[b.y * 64 + a.x], v11 = lut[b.y * 64 + b.x];
   return mix(mix(v00, v10, t.x), mix(v01, v11, t.x), t.y);
 }
-float3 rbf(float3 input, device const float *lut) {
-  float3 q = input * 64.f;
-  if (any(q < 0.f) || any(q > 64.f)) return input;
+float3 rbf(float3 input, constant Params &p, device const float *lut) {
+  float3 bounded = clamp(input, 0.f, 1.f);
+  float3 q = bounded * 64.f;
   int3 a = int3(q), b = min(a + 1, int3(64));
   float3 t = q - float3(a);
   float3 v = float3(0.f);
@@ -79,14 +80,16 @@ float3 rbf(float3 input, device const float *lut) {
     int index = ((ri*65+gi)*65+bi)*3;
     v += float3(lut[index],lut[index+1],lut[index+2]) * w;
   }
-  return v;
+  float3 delta = input - bounded;
+  return v + p.rbfSlope[0].xyz * delta.x +
+         p.rbfSlope[1].xyz * delta.y + p.rbfSlope[2].xyz * delta.z;
 }
 float3 match(float3 input, constant Params &p, device const float2 *lut,
              device const float *rbfLut) {
   if (!all(isfinite(input))) return input;
   if (p.method == 2) {
     if (p.biasWeight <= 0.f) return input;
-    float3 matched = rbf(input, rbfLut);
+    float3 matched = rbf(input, p, rbfLut);
     float3 out = input + clamp(p.biasWeight,0.f,2.f)*(matched-input);
     return all(isfinite(out)) ? out : input;
   }

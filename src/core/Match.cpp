@@ -307,14 +307,14 @@ std::shared_ptr<const RbfLut> makeRbfLut(const Solution &s) {
       }
   return lut;
 }
-static RGB sampleRbf(const RbfLut &lut, RGB x) {
+static RGB sampleRbf(const RbfLut &lut, const Solution &s, RGB x) {
+  RGB bounded{clamp(x.r, rbfMin, rbfMax), clamp(x.g, rbfMin, rbfMax),
+              clamp(x.b, rbfMin, rbfMax)};
   auto coordinate = [](double v) {
     return (v - rbfMin) * (rbfGridSize - 1) / (rbfMax - rbfMin);
   };
-  double p[3] = {coordinate(x.r), coordinate(x.g), coordinate(x.b)};
-  for (double v : p)
-    if (v < 0 || v > rbfGridSize - 1)
-      return x;
+  double p[3] = {coordinate(bounded.r), coordinate(bounded.g),
+                 coordinate(bounded.b)};
   int lo[3] = {int(p[0]), int(p[1]), int(p[2])};
   int hi[3] = {std::min(lo[0] + 1, rbfGridSize - 1),
                std::min(lo[1] + 1, rbfGridSize - 1),
@@ -331,7 +331,9 @@ static RGB sampleRbf(const RbfLut &lut, RGB x) {
     int i = ((r * rbfGridSize + g) * rbfGridSize + b) * 3;
     y = y + RGB{lut.values[i], lut.values[i + 1], lut.values[i + 2]} * w;
   }
-  return y;
+  RGB delta = x - bounded;
+  return y + s.rbfAffine[1] * delta.r + s.rbfAffine[2] * delta.g +
+         s.rbfAffine[3] * delta.b;
 }
 static std::array<double, 2> sampleRadial(const RadialLut &lut, double x,
                                           double y) {
@@ -358,7 +360,8 @@ RGB transform(RGB input, const Solution &s, const Amounts &a,
   if (s.method == MatchMethod::Rbf) {
     if (a.bypass || !s.valid || !finite(input) || a.biasWeight <= 0)
       return input;
-    RGB matched = rbfLut ? sampleRbf(*rbfLut, input) : evaluateRbf(s, input);
+    RGB matched = rbfLut ? sampleRbf(*rbfLut, s, input)
+                         : evaluateRbf(s, input);
     RGB out = input + (matched - input) * clamp(a.biasWeight, 0, 2);
     return finite(out) ? out : input;
   }

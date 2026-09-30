@@ -590,6 +590,12 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       m.hue[j] = float(s.hue[j]);
       m.sat[j] = float(s.sat[j]);
     }
+    for (int j = 0; j < 3; ++j) {
+      const RGB &slope = s.rbfAffine[j + 1];
+      m.rbfSlope[j][0] = float(slope.r);
+      m.rbfSlope[j][1] = float(slope.g);
+      m.rbfSlope[j][2] = float(slope.b);
+    }
     m.neutral[0] = float(s.neutralLog.r);
     m.neutral[1] = float(s.neutralLog.g);
     m.neutral[2] = float(s.neutralLog.b);

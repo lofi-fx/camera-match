@@ -101,6 +101,12 @@ int main() {
     solution.rbfAffine[1] = {1, 0, 0};
     solution.rbfAffine[2] = {0, 1, 0};
     solution.rbfAffine[3] = {0, 0, 1};
+    for (int j = 0; j < 3; ++j) {
+      const RGB &slope = solution.rbfAffine[j + 1];
+      p.rbfSlope[j][0] = float(slope.r);
+      p.rbfSlope[j][1] = float(slope.g);
+      p.rbfSlope[j][2] = float(slope.b);
+    }
     auto rbfLut = makeRbfLut(solution);
     p.method = 2;
     p.biasWeight = 1.2f;
