@@ -58,7 +58,7 @@ static bool regress(const std::vector<std::array<double, 5>> &rows,
   return true;
 }
 SolveResult solve(const Capture &hero, const Capture &target,
-                  const Geometry &geo) {
+                  const Geometry &geo, MatchMethod method) {
   SolveResult result;
   if (hero.chartModel != target.chartModel || geo.model != hero.chartModel) {
     result.error = "Hero and target chart models differ";
@@ -88,6 +88,7 @@ SolveResult solve(const Capture &hero, const Capture &target,
     return result;
   }
   auto &s = result.solution;
+  s.method = method;
   s.stops = clamp(median(stops), -4, 4);
   s.neutralCount = int(stops.size());
   std::vector<double> dev;
@@ -122,6 +123,10 @@ SolveResult solve(const Capture &hero, const Capture &target,
     double w = clamp(std::min(a.valid, b.valid) / 100., .2, 1.);
     if (p[i].role == Role::Skin)
       w *= .6;
+    if (method == MatchMethod::Radial && s.radialCount < int(s.radial.size()))
+      s.radial[s.radialCount++] = {lb.a / lb.L, lb.b / lb.L,
+                                   clamp(dh, -M_PI / 6, M_PI / 6),
+                                   clamp(ds, -std::log(2.), std::log(2.)), w};
     hr.push_back(
         {1, std::sin(h), std::cos(h), clamp(dh, -M_PI / 6, M_PI / 6), w});
     sr.push_back({1, std::sin(h), std::cos(h),
@@ -131,8 +136,11 @@ SolveResult solve(const Capture &hero, const Capture &target,
   int sectorCount = 0;
   for (bool v : sectors)
     sectorCount += v;
-  if (hr.size() >= 4 && sectorCount >= 4 && regress(hr, s.hue) &&
-      regress(sr, s.sat)) {
+  if (method == MatchMethod::Radial && hr.size() >= 4 && sectorCount >= 4) {
+    s.valid = true;
+  } else if (method == MatchMethod::Harmonic && hr.size() >= 4 &&
+             sectorCount >= 4 && regress(hr, s.hue) &&
+             regress(sr, s.sat)) {
     double maxHue = 0, maxDerivative = 0, maxSat = 0;
     for (int j = 0; j < 360; j++) {
       double h = -M_PI + 2 * M_PI * j / 360.;
@@ -151,29 +159,88 @@ SolveResult solve(const Capture &hero, const Capture &target,
     for (double &v : s.sat)
       v *= ss;
     s.valid = true;
-  } else
+  } else {
+    s.radialCount = 0;
     result.error = "Neutral/exposure match only: need chromatic patches "
                    "spanning four hue regions";
+  }
   if (!s.valid)
     s.valid = true;
   return result;
 }
-RGB transform(RGB input, const Solution &s, const Amounts &a) {
+static std::array<double, 2> radialAt(const Solution &s, double x, double y) {
+  double hue = 0, sat = 0, total = .35;
+  for (int j = 0; j < s.radialCount; ++j) {
+    const auto &a = s.radial[j];
+    double distance = std::hypot(x - a.x, y - a.y) / .38;
+    if (distance >= 1)
+      continue;
+    double t = 1 - distance;
+    double w = a.weight * t * t * t * t * (1 + 4 * distance);
+    hue += w * a.hue;
+    sat += w * a.saturation;
+    total += w;
+  }
+  return {hue / total, sat / total};
+}
+RadialLut makeRadialLut(const Solution &s) {
+  RadialLut lut;
+  for (int y = 0; y < radialGridSize; ++y)
+    for (int x = 0; x < radialGridSize; ++x) {
+      auto v = radialAt(s, -1. + 2. * x / (radialGridSize - 1),
+                        -1. + 2. * y / (radialGridSize - 1));
+      int i = (y * radialGridSize + x) * 2;
+      lut.values[i] = float(v[0]);
+      lut.values[i + 1] = float(v[1]);
+    }
+  return lut;
+}
+static std::array<double, 2> sampleRadial(const RadialLut &lut, double x,
+                                          double y) {
+  double gx = clamp((x + 1) * .5 * (radialGridSize - 1), 0,
+                    radialGridSize - 1),
+         gy = clamp((y + 1) * .5 * (radialGridSize - 1), 0,
+                    radialGridSize - 1);
+  int ix = int(gx), iy = int(gy);
+  int jx = std::min(ix + 1, radialGridSize - 1),
+      jy = std::min(iy + 1, radialGridSize - 1);
+  double tx = gx - ix, ty = gy - iy;
+  std::array<double, 2> result{};
+  for (int c = 0; c < 2; ++c) {
+    auto at = [&](int px, int py) {
+      return double(lut.values[(py * radialGridSize + px) * 2 + c]);
+    };
+    result[c] = (1 - ty) * ((1 - tx) * at(ix, iy) + tx * at(jx, iy)) +
+                ty * ((1 - tx) * at(ix, jy) + tx * at(jx, jy));
+  }
+  return result;
+}
+RGB transform(RGB input, const Solution &s, const Amounts &a,
+              const RadialLut *lut) {
   if (a.bypass || !s.valid ||
-      (a.hue == 0 && a.sat == 0 && a.exposure == 0 && a.neutral == 0) ||
+      (((a.hue == 0 && a.sat == 0) ||
+        (s.method == MatchMethod::Radial && a.biasWeight == 0)) &&
+       a.exposure == 0 && a.neutral == 0) ||
       !finite(input))
     return input;
   RGB x = decode(input);
   double y = luminance(x);
   if (a.neutral > 0 && y > 1e-7)
     x = neutral(x, s.neutralLog, clamp(a.neutral, 0, 1));
-  if ((a.hue > 0 || a.sat > 0) && y > 1e-6) {
+  if ((a.hue > 0 || a.sat > 0) &&
+      (s.method != MatchMethod::Radial || a.biasWeight > 0) && y > 1e-6) {
     Lab l = toOklab(x);
     double c = std::hypot(l.a, l.b);
     if (l.L > 1e-5 && c / l.L > .005) {
       double h = std::atan2(l.b, l.a),
              dh = s.hue[0] + s.hue[1] * std::sin(h) + s.hue[2] * std::cos(h),
              ds = s.sat[0] + s.sat[1] * std::sin(h) + s.sat[2] * std::cos(h);
+      if (s.method == MatchMethod::Radial) {
+        auto v = lut ? sampleRadial(*lut, l.a / l.L, l.b / l.L)
+                     : radialAt(s, l.a / l.L, l.b / l.L);
+        dh = v[0] * clamp(a.biasWeight, 0, 2);
+        ds = v[1] * clamp(a.biasWeight, 0, 2);
+      }
       double h2 = h + clamp(a.hue, 0, 1) * clamp(dh, -M_PI / 6, M_PI / 6),
              c2 = c * std::exp(clamp(a.sat, 0, 1) *
                                clamp(ds, -std::log(2.), std::log(2.)));

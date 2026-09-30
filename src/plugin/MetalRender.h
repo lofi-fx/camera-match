@@ -7,6 +7,8 @@ struct alignas(16) MetalParams {
   float hue[4], sat[4], neutral[4];
   float stops, hueAmount, satAmount, exposureAmount;
   float neutralAmount;
+  float biasWeight;
+  int32_t method;
   int32_t srcX, srcY, srcW, srcH;
   int32_t dstX, dstY, dstW, dstH;
   int32_t winX, winY, winW, winH;
@@ -17,5 +19,5 @@ struct alignas(16) MetalParams {
 };
 
 bool renderMetal(void *queue, void *source, void *output,
-                 const MetalParams &params);
+                 const MetalParams &params, const RadialLut *lut = nullptr);
 } // namespace cm

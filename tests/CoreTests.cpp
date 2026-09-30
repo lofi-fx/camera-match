@@ -58,6 +58,19 @@ int main() {
   Persistent restored;
   assert(deserialize(serialize(received), restored));
   assert(restored.hero.name == "Hero A" && restored.hero.revision == 7);
+  std::string oldBody = serialize(received);
+  oldBody.resize(oldBody.find_last_of(' '));
+  assert(oldBody.substr(oldBody.size() - 4) == " 0 0");
+  oldBody.resize(oldBody.size() - 4);
+  oldBody.replace(0, 3, "CM2");
+  uint64_t oldHash = 14695981039346656037ull;
+  for (unsigned char c : oldBody) {
+    oldHash ^= c;
+    oldHash *= 1099511628211ull;
+  }
+  Persistent legacy;
+  assert(deserialize(oldBody + " " + std::to_string(oldHash), legacy));
+  assert(legacy.solution.method == MatchMethod::Harmonic);
   Persistent p;
   p.hasHero = true;
   p.hero.name = "Test hero";
@@ -164,6 +177,46 @@ int main() {
     exp.exposure = .5;
     RGB half = decode(transform(encode(colors[0]), fit.solution, exp));
     assert(std::abs(half.r - std::sqrt(2) * colors[0].r) < 1e-6);
+    size_t chosen = 0;
+    while (chosen < layout(model).size() &&
+           layout(model)[chosen].role != Role::Chromatic)
+      ++chosen;
+    assert(chosen < layout(model).size());
+    Lab shifted = toOklab(hero.patch[chosen].rgb);
+    double angle = std::atan2(shifted.b, shifted.a) + .18;
+    double chroma = std::hypot(shifted.a, shifted.b);
+    hero.patch[chosen].rgb = fromOklab(
+        {shifted.L, chroma * std::cos(angle), chroma * std::sin(angle)});
+    auto radial = solve(hero, target, geo, MatchMethod::Radial);
+    assert(radial.solution.valid && radial.solution.radialCount >= 4);
+    auto lut = makeRadialLut(radial.solution);
+    Amounts chromatic{1, 1, 0, 0, false, 1};
+    auto direct = transform(encode(target.patch[chosen].rgb),
+                            radial.solution, chromatic);
+    auto cached = transform(encode(target.patch[chosen].rgb),
+                            radial.solution, chromatic, &lut);
+    assert(std::abs(direct.r - cached.r) < .003);
+    assert(std::abs(direct.g - cached.g) < .003);
+    assert(std::abs(direct.b - cached.b) < .003);
+    chromatic.biasWeight = 0;
+    auto zero = transform(encode(target.patch[chosen].rgb),
+                          radial.solution, chromatic, &lut);
+    RGB original = encode(target.patch[chosen].rgb);
+    assert(std::abs(zero.r - original.r) < 1e-6);
+    Persistent savedRadial;
+    savedRadial.hasHero = savedRadial.hasTarget = true;
+    hero.geometry.model = target.geometry.model = model;
+    for (auto &patch : hero.patch)
+      patch.candidate = patch.valid;
+    for (auto &patch : target.patch)
+      patch.candidate = patch.valid;
+    savedRadial.hero = hero;
+    savedRadial.target = target;
+    savedRadial.solution = radial.solution;
+    Persistent reopened;
+    assert(deserialize(serialize(savedRadial), reopened));
+    assert(reopened.solution.method == MatchMethod::Radial);
+    assert(reopened.solution.radialCount == radial.solution.radialCount);
   }
   for (int rot = 0; rot < 4; rot++)
     for (bool mirror : {false, true}) {
@@ -193,5 +246,25 @@ int main() {
     auto z = transform(encode(v), s, Amounts{});
     assert(finite(z));
   }
+  Solution local;
+  local.valid = true;
+  local.method = MatchMethod::Radial;
+  local.radialCount = 1;
+  local.radial[0] = {.2, .0833333333, .2, 0, 1};
+  auto localLut = makeRadialLut(local);
+  RGB near = encode(fromOklab({.6, .12, .05}));
+  RGB far = encode(fromOklab({.6, -.12, -.05}));
+  Amounts localAmount{1, 0, 0, 0, false, 1};
+  auto hueShift = [](RGB before, RGB after) {
+    auto a = toOklab(decode(before)), b = toOklab(decode(after));
+    return std::abs(std::remainder(std::atan2(b.b, b.a) -
+                                   std::atan2(a.b, a.a), 2 * M_PI));
+  };
+  assert(hueShift(near, transform(near, local, localAmount, &localLut)) >
+         hueShift(far, transform(far, local, localAmount, &localLut)) + .05);
+  localAmount.biasWeight = 0;
+  auto unchanged = transform(near, local, localAmount, &localLut);
+  assert(unchanged.r == near.r && unchanged.g == near.g &&
+         unchanged.b == near.b);
   std::cout << "core checks passed\n";
 }

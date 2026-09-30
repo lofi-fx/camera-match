@@ -22,23 +22,38 @@ struct Capture {
   std::array<int, 4> bounds{};
   double scaleX = 1, scaleY = 1, par = 1;
 };
+enum class MatchMethod { Harmonic = 0, Radial = 1 };
+struct RadialAnchor {
+  double x = 0, y = 0, hue = 0, saturation = 0, weight = 0;
+};
+constexpr int radialGridSize = 64;
+struct RadialLut {
+  std::array<float, radialGridSize * radialGridSize * 2> values{};
+};
 struct Solution {
   bool valid = false;
   double stops = 0;
   RGB neutralLog{};
   std::array<double, 3> hue{}, sat{};
+  MatchMethod method = MatchMethod::Harmonic;
+  std::array<RadialAnchor, 32> radial{};
+  int radialCount = 0;
   int neutralCount = 0, colorCount = 0;
   double exposureMAD = 0;
 };
 struct Amounts {
   double hue = 1, sat = 1, exposure = 1, neutral = 1;
   bool bypass = false;
+  double biasWeight = 1;
 };
 struct SolveResult {
   Solution solution{};
   std::string error;
 };
 SolveResult solve(const Capture &hero, const Capture &target,
-                  const Geometry &geometry);
-RGB transform(RGB encoded, const Solution &solution, const Amounts &amounts);
+                  const Geometry &geometry,
+                  MatchMethod method = MatchMethod::Harmonic);
+RadialLut makeRadialLut(const Solution &solution);
+RGB transform(RGB encoded, const Solution &solution, const Amounts &amounts,
+              const RadialLut *lut = nullptr);
 } // namespace cm

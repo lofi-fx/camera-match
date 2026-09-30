@@ -11,6 +11,8 @@ struct Params {
   float4 hue, sat, neutral;
   float stops, hueAmount, satAmount, exposureAmount;
   float neutralAmount;
+  float biasWeight;
+  int method;
   int srcX, srcY, srcW, srcH;
   int dstX, dstY, dstW, dstH;
   int winX, winY, winW, winH;
@@ -52,7 +54,15 @@ float3 fromLab(float3 v) {
                 dot(xyz,float3(-.46491710f,1.25142378f,.17488461f)),
                 dot(xyz,float3(.06484905f,.10913934f,.76141462f)));
 }
-float3 match(float3 input, constant Params &p) {
+float2 radial(float2 chroma, device const float2 *lut) {
+  float2 q = clamp((chroma + 1.f) * .5f * 63.f, 0.f, 63.f);
+  int2 a = int2(q), b = min(a + 1, int2(63));
+  float2 t = q - float2(a);
+  float2 v00 = lut[a.y * 64 + a.x], v10 = lut[a.y * 64 + b.x];
+  float2 v01 = lut[b.y * 64 + a.x], v11 = lut[b.y * 64 + b.x];
+  return mix(mix(v00, v10, t.x), mix(v01, v11, t.x), t.y);
+}
+float3 match(float3 input, constant Params &p, device const float2 *lut) {
   if (!all(isfinite(input))) return input;
   float3 x = decodeDI(input);
   float y = luma(x);
@@ -61,13 +71,20 @@ float3 match(float3 input, constant Params &p) {
     float zy = luma(z);
     if (zy > 1e-7f && all(isfinite(z))) x = z * (y / zy);
   }
-  if ((p.hueAmount > 0.f || p.satAmount > 0.f) && y > 1e-6f) {
+  if ((p.hueAmount > 0.f || p.satAmount > 0.f) &&
+      (p.method != 1 || p.biasWeight > 0.f) && y > 1e-6f) {
     float3 l = toLab(x);
     float c = length(l.yz);
     if (l.x > 1e-5f && c / l.x > .005f) {
       float h = atan2(l.z,l.y);
-      float dh = p.hue.x + p.hue.y*sin(h) + p.hue.z*cos(h);
-      float ds = p.sat.x + p.sat.y*sin(h) + p.sat.z*cos(h);
+      float dh, ds;
+      if (p.method == 1) {
+        float2 change = radial(l.yz/l.x, lut) * clamp(p.biasWeight,0.f,2.f);
+        dh = change.x; ds = change.y;
+      } else {
+        dh = p.hue.x + p.hue.y*sin(h) + p.hue.z*cos(h);
+        ds = p.sat.x + p.sat.y*sin(h) + p.sat.z*cos(h);
+      }
       float h2 = h + clamp(p.hueAmount,0.f,1.f)*clamp(dh,-.5235987756f,.5235987756f);
       float c2 = c * exp(clamp(p.satAmount,0.f,1.f)*clamp(ds,-.6931471806f,.6931471806f));
       float3 z = fromLab(float3(l.x,c2*cos(h2),c2*sin(h2)));
@@ -85,6 +102,7 @@ float3 match(float3 input, constant Params &p) {
 kernel void cameraMatch(device const float *src [[buffer(0)]],
                         device float *dst [[buffer(1)]],
                         constant Params &p [[buffer(2)]],
+                        device const float2 *lut [[buffer(3)]],
                         uint2 tid [[thread_position_in_grid]]) {
   if (tid.x >= uint(p.winW) || tid.y >= uint(p.winH)) return;
   int x = p.winX + int(tid.x), y = p.winY + int(tid.y);
@@ -102,7 +120,7 @@ kernel void cameraMatch(device const float *src [[buffer(0)]],
   float alpha = p.srcComponents == 4 ? src[si+3] : 1.f;
   float3 rgb = float3(src[si],src[si+1],src[si+2]);
   if (p.srcPremult && alpha > 1e-6f) rgb /= alpha;
-  float3 out = match(rgb,p);
+  float3 out = match(rgb,p,lut);
   if (p.dstPremult) out *= alpha;
   dst[di]=out.x; dst[di+1]=out.y; dst[di+2]=out.z;
   if (p.dstComponents == 4) dst[di+3]=alpha;
@@ -115,7 +133,7 @@ id<MTLComputePipelineState> pipeline = nil;
 }
 
 bool renderMetal(void *queuePtr, void *source, void *output,
-                 const MetalParams &p) {
+                 const MetalParams &p, const RadialLut *lut) {
   @autoreleasepool {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLBuffer> src = (__bridge id<MTLBuffer>)source;
@@ -148,10 +166,17 @@ bool renderMetal(void *queuePtr, void *source, void *output,
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     if (!command || !encoder) return false;
+    float empty[2]{};
+    id<MTLBuffer> radialBuffer = [queue.device
+        newBufferWithBytes:lut ? lut->values.data() : empty
+                  length:lut ? sizeof(lut->values) : sizeof(empty)
+                 options:MTLResourceStorageModeShared];
+    if (!radialBuffer) return false;
     [encoder setComputePipelineState:current];
     [encoder setBuffer:src offset:0 atIndex:0];
     [encoder setBuffer:dst offset:0 atIndex:1];
     [encoder setBytes:&p length:sizeof(p) atIndex:2];
+    [encoder setBuffer:radialBuffer offset:0 atIndex:3];
     NSUInteger width = current.threadExecutionWidth;
     NSUInteger height = std::max<NSUInteger>(1, current.maxTotalThreadsPerThreadgroup / width);
     [encoder dispatchThreads:MTLSizeMake(p.winW,p.winH,1)

@@ -72,7 +72,7 @@ static bool readCapture(std::istream &i, Capture &c) {
 }
 std::string serialize(const Persistent &s) {
   std::ostringstream o;
-  o << std::setprecision(17) << "CM2 " << s.hasHero << ' ' << s.hasTarget
+  o << std::setprecision(17) << "CM3 " << s.hasHero << ' ' << s.hasTarget
     << ' ';
   writeCapture(o, s.hero);
   writeCapture(o, s.target);
@@ -83,7 +83,13 @@ std::string serialize(const Persistent &s) {
     o << v << ' ';
   for (double v : x.sat)
     o << v << ' ';
-  o << x.neutralCount << ' ' << x.colorCount << ' ' << x.exposureMAD;
+  o << x.neutralCount << ' ' << x.colorCount << ' ' << x.exposureMAD << ' '
+    << int(x.method) << ' ' << x.radialCount;
+  for (int j = 0; j < x.radialCount; ++j) {
+    auto a = x.radial[j];
+    o << ' ' << a.x << ' ' << a.y << ' ' << a.hue << ' ' << a.saturation
+      << ' ' << a.weight;
+  }
   std::string body = o.str();
   std::ostringstream result;
   result << body << ' ' << hash(body);
@@ -106,7 +112,8 @@ bool deserialize(const std::string &str, Persistent &out) {
   std::string tag;
   Persistent s;
   int hero = 0, target = 0, valid = 0;
-  if (!(i >> tag >> hero >> target) || tag != "CM2" || hero < 0 || hero > 1 ||
+  if (!(i >> tag >> hero >> target) || (tag != "CM2" && tag != "CM3") ||
+      hero < 0 || hero > 1 ||
       target < 0 || target > 1 || !readCapture(i, s.hero) ||
       !readCapture(i, s.target))
     return false;
@@ -122,6 +129,21 @@ bool deserialize(const std::string &str, Persistent &out) {
       return false;
   if (!(i >> x.neutralCount >> x.colorCount >> x.exposureMAD))
     return false;
+  if (tag == "CM3") {
+    int method = 0;
+    if (!(i >> method >> x.radialCount) || method < 0 || method > 1 ||
+        x.radialCount < 0 || x.radialCount > int(x.radial.size()))
+      return false;
+    x.method = MatchMethod(method);
+    for (int j = 0; j < x.radialCount; ++j) {
+      auto &a = x.radial[j];
+      if (!(i >> a.x >> a.y >> a.hue >> a.saturation >> a.weight) ||
+          !std::isfinite(a.x) || !std::isfinite(a.y) ||
+          !std::isfinite(a.hue) || !std::isfinite(a.saturation) ||
+          !std::isfinite(a.weight) || a.weight < 0 || a.weight > 1)
+        return false;
+    }
+  }
   std::string extra;
   if (i >> extra)
     return false;

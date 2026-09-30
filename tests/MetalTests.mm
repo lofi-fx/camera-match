@@ -68,6 +68,28 @@ int main() {
       assert(output[i + 3] == .5f);
     }
     assert(maxError < .003);
+    solution.method = MatchMethod::Radial;
+    solution.radialCount = 1;
+    solution.radial[0] = {.15, .12, .12, .2, 1};
+    auto lut = makeRadialLut(solution);
+    p.method = 1;
+    p.biasWeight = 1.4f;
+    amount.biasWeight = 1.4;
+    assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
+                       (__bridge void *)dst, p, &lut));
+    fence = [queue commandBuffer];
+    [fence commit];
+    [fence waitUntilCompleted];
+    assert(fence.status == MTLCommandBufferStatusCompleted);
+    maxError = 0;
+    for (int i = 0; i < count; i += 4) {
+      RGB expected = transform({input[i], input[i + 1], input[i + 2]},
+                               solution, amount, &lut);
+      maxError = std::max({maxError, std::abs(output[i] - expected.r),
+                           std::abs(output[i + 1] - expected.g),
+                           std::abs(output[i + 2] - expected.b)});
+    }
+    assert(maxError < .003);
     p.exactCopy = 1;
     assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
                        (__bridge void *)dst, p));
