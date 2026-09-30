@@ -65,7 +65,6 @@ struct Instance {
     std::string payload;
     Solution solution;
     std::shared_ptr<const RadialLut> lut;
-    std::shared_ptr<const RbfLut> rbfLut;
   };
   std::shared_ptr<const RenderSnapshot> renderSnapshot;
 };
@@ -555,9 +554,6 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       if (next->solution.method == MatchMethod::RadialLegacy &&
           next->solution.radialCount > 0)
         next->lut = std::make_shared<RadialLut>(makeRadialLut(next->solution));
-      if (next->solution.method == MatchMethod::Rbf &&
-          next->solution.rbfCount > 0)
-        next->rbfLut = makeRbfLut(next->solution);
       inst->renderSnapshot = next;
     }
     snapshot = inst->renderSnapshot;
@@ -590,12 +586,25 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       m.hue[j] = float(s.hue[j]);
       m.sat[j] = float(s.sat[j]);
     }
-    for (int j = 0; j < 3; ++j) {
-      const RGB &slope = s.rbfAffine[j + 1];
-      m.rbfSlope[j][0] = float(slope.r);
-      m.rbfSlope[j][1] = float(slope.g);
-      m.rbfSlope[j][2] = float(slope.b);
+    for (int j = 0; j < std::min(s.rbfCount, 32); ++j) {
+      const RGB &center = s.rbfCenters[j], &weight = s.rbfWeights[j];
+      m.rbfCenter[j][0] = float(center.r);
+      m.rbfCenter[j][1] = float(center.g);
+      m.rbfCenter[j][2] = float(center.b);
+      m.rbfWeight[j][0] = float(weight.r);
+      m.rbfWeight[j][1] = float(weight.g);
+      m.rbfWeight[j][2] = float(weight.b);
     }
+    for (int j = 0; j < 4; ++j) {
+      const RGB &affine = s.rbfAffine[j];
+      m.rbfAffine[j][0] = float(affine.r);
+      m.rbfAffine[j][1] = float(affine.g);
+      m.rbfAffine[j][2] = float(affine.b);
+    }
+    m.rbfCount = std::min(s.rbfCount, 32);
+    m.rbfInvSupportSq = s.rbfSupport > 0
+                            ? float(1. / (s.rbfSupport * s.rbfSupport))
+                            : 0.f;
     m.neutral[0] = float(s.neutralLog.r);
     m.neutral[1] = float(s.neutralLog.g);
     m.neutral[2] = float(s.neutralLog.b);
@@ -621,8 +630,7 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     m.srcPremult = src.premult;
     m.dstPremult = dst.premult;
     m.exactCopy = exactCopy;
-    return renderMetal(queue, src.data, dst.data, m, snapshot->lut.get(),
-                       snapshot->rbfLut) ? kOfxStatOK
+    return renderMetal(queue, src.data, dst.data, m, snapshot->lut.get()) ? kOfxStatOK
                                                     : kOfxStatGPURenderFailed;
   }
 #endif
@@ -646,8 +654,7 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       double alpha = src.components == 4 ? p[3] : 1.0;
       if (src.premult && alpha > 1e-6)
         rgb = rgb / alpha;
-      RGB z = transform(rgb, s, a, snapshot->lut.get(),
-                        snapshot->rbfLut.get());
+      RGB z = transform(rgb, s, a, snapshot->lut.get());
       if (dst.premult)
         z = z * alpha;
       d[0] = float(z.r);

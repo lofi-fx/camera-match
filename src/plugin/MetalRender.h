@@ -1,12 +1,13 @@
 #pragma once
 #include "Match.h"
 #include <cstdint>
-#include <memory>
 
 namespace cm {
 struct alignas(16) MetalParams {
   float hue[4], sat[4], neutral[4];
-  float rbfSlope[3][4];
+  float rbfCenter[32][4], rbfWeight[32][4], rbfAffine[4][4];
+  float rbfInvSupportSq;
+  int32_t rbfCount;
   float stops, hueAmount, satAmount, exposureAmount;
   float neutralAmount;
   float biasWeight;
@@ -21,6 +22,5 @@ struct alignas(16) MetalParams {
 };
 
 bool renderMetal(void *queue, void *source, void *output,
-                 const MetalParams &params, const RadialLut *lut = nullptr,
-                 std::shared_ptr<const RbfLut> rbfLut = {});
+                 const MetalParams &params, const RadialLut *lut = nullptr);
 } // namespace cm

@@ -12,7 +12,7 @@ int main() {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     assert(device);
     id<MTLCommandQueue> queue = [device newCommandQueue];
-    constexpr int width = 32, height = 24;
+    constexpr int width = 256, height = 64;
     constexpr int count = width * height * 4;
     id<MTLBuffer> src = [device newBufferWithLength:count * sizeof(float)
                                           options:MTLResourceStorageModeShared];
@@ -94,25 +94,45 @@ int main() {
     solution = {};
     solution.valid = true;
     solution.method = MatchMethod::Rbf;
-    solution.rbfCount = 1;
-    solution.rbfSupport = .4;
-    solution.rbfCenters[0] = {.5, .5, .5};
-    solution.rbfWeights[0] = {.05, 0, -.04};
+    solution.rbfCount = 25;
+    solution.rbfSupport = .1;
+    for (int j = 0; j < solution.rbfCount; ++j) {
+      solution.rbfCenters[j] = {.1 + .2 * (j % 5),
+                                 .1 + .2 * (j / 5), .5};
+      solution.rbfWeights[j] = {.01 * (j % 3 - 1),
+                                 .008 * (j % 4 - 2), .004};
+    }
     solution.rbfAffine[1] = {1, 0, 0};
     solution.rbfAffine[2] = {0, 1, 0};
     solution.rbfAffine[3] = {0, 0, 1};
-    for (int j = 0; j < 3; ++j) {
-      const RGB &slope = solution.rbfAffine[j + 1];
-      p.rbfSlope[j][0] = float(slope.r);
-      p.rbfSlope[j][1] = float(slope.g);
-      p.rbfSlope[j][2] = float(slope.b);
+    p.rbfCount = solution.rbfCount;
+    p.rbfInvSupportSq = 1.f / float(solution.rbfSupport * solution.rbfSupport);
+    for (int j = 0; j < solution.rbfCount; ++j) {
+      p.rbfCenter[j][0] = float(solution.rbfCenters[j].r);
+      p.rbfCenter[j][1] = float(solution.rbfCenters[j].g);
+      p.rbfCenter[j][2] = float(solution.rbfCenters[j].b);
+      p.rbfWeight[j][0] = float(solution.rbfWeights[j].r);
+      p.rbfWeight[j][1] = float(solution.rbfWeights[j].g);
+      p.rbfWeight[j][2] = float(solution.rbfWeights[j].b);
     }
-    auto rbfLut = makeRbfLut(solution);
+    for (int j = 0; j < 4; ++j) {
+      p.rbfAffine[j][0] = float(solution.rbfAffine[j].r);
+      p.rbfAffine[j][1] = float(solution.rbfAffine[j].g);
+      p.rbfAffine[j][2] = float(solution.rbfAffine[j].b);
+    }
+    for (int y = 0; y < height; ++y)
+      for (int x = 0; x < width; ++x) {
+        int i = (y * width + x) * 4;
+        input[i] = x == 0 ? -.1f : x == width - 1 ? 1.1f
+                                                   : float(x) / (width - 1);
+        input[i + 1] = .5f;
+        input[i + 2] = .5f;
+      }
     p.method = 2;
     p.biasWeight = 1.2f;
     amount.biasWeight = 1.2;
     assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
-                       (__bridge void *)dst, p, nullptr, rbfLut));
+                       (__bridge void *)dst, p));
     fence = [queue commandBuffer];
     [fence commit];
     [fence waitUntilCompleted];
@@ -120,12 +140,12 @@ int main() {
     maxError = 0;
     for (int i = 0; i < count; i += 4) {
       RGB expected = transform({input[i], input[i + 1], input[i + 2]},
-                               solution, amount, nullptr, rbfLut.get());
+                               solution, amount);
       maxError = std::max({maxError, std::abs(output[i] - expected.r),
                            std::abs(output[i + 1] - expected.g),
                            std::abs(output[i + 2] - expected.b)});
     }
-    assert(maxError < .003);
+    assert(maxError < .0005);
     p.exactCopy = 1;
     assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
                        (__bridge void *)dst, p));
