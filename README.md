@@ -1,8 +1,107 @@
 # LoFi FX Camera Match
 
-A native OpenFX filter for the DaVinci Resolve Color page. It measures a reference camera and another camera from a ColorChecker Video or ColorChecker Passport Video **color target**, saves the samples and correction inside the node, and applies a frozen relative match to later shots. Rendering uses Metal when Resolve supplies GPU buffers, with a CPU fallback.
+A ColorChecker-based camera matching **OFX plugin for DaVinci Resolve**. Match the cameras in your scene to a reference camera, then reuse each correction across your footage—with GPU rendering on Apple silicon Macs.
 
-## One-command build and launch
+When a cut changes skin tones, shifts a neutral wall, or makes one angle feel more saturated, camera matching becomes work you have to do before the creative grade. LoFi FX Camera Match uses chart footage from each camera to build a shared starting point. Choose the camera you want to match, capture its reference, and bring the other angles toward it without leaving Resolve’s Color page.
+
+## Features
+
+- **Reference camera matching** — use the camera you choose as the reference for color, skin tones, neutral balance, saturation, and brightness across the scene.
+- **ColorChecker chart support** — built-in layouts for ColorChecker Video and the Passport Video color panel, including the video color target in Passport Video 2.
+- **On-screen chart alignment** — position four corner handles, rotate or mirror the layout, and adjust sample areas to line up with your chart footage.
+- **Selective patch sampling** — exclude patches affected by glare or obstructions so they do not drive the match.
+- **Named references** — keep separate references for different scenes and lighting setups, then apply the right one to each camera.
+- **Adjustable match strength** — dial the overall correction with Reference match %, plus separate Saturation match and Exposure match controls.
+- **Reusable corrections** — copy a solved node to other shots from the same camera and lighting setup. Those shots do not need a chart, and the correction stays saved with the project.
+- **Native DWG/Intermediate workflow** — match in DaVinci Wide Gamut / DaVinci Intermediate before your creative grade.
+- **GPU rendering** — Metal rendering when Resolve supplies GPU buffers, with a CPU fallback. The current build targets Apple silicon macOS.
+
+## Supported charts
+
+The plugin has **two chart layouts**: full-size Video and Passport Video. Select the layout that matches your physical chart.
+
+| Chart | Supported target | Choose in the plugin |
+| --- | --- | --- |
+| **Calibrite ColorChecker Video** | The full-size video color target with skin-tone patches, gray scales, and color patches. | **Color Checker Video** |
+| **ColorChecker Passport Video** | The video color panel with 24 patches: color, skin-tone, gray, and check patches. Original X-Rite and Calibrite-branded charts must match this layout. | **Color Checker Passport Video** |
+| **Calibrite ColorChecker Passport Video 2** | Its video color panel, using the Passport Video layout. The separate Classic panel is not used. | **Color Checker Passport Video** |
+
+**Passport Video is the default.** Align the overlay to its color panel only; leave the separate three-bar grayscale panel outside the corners. The supported grid has four columns and six rows before rotation.
+
+## Download
+
+[Download v0.9 beta (macOS, Apple silicon)](https://github.com/lofi-fx/camera-match/releases/tag/v0.9-beta)
+
+The download includes `LoFiFxCameraMatch.ofx.bundle`. Source builds are also available using the instructions below.
+
+## Installing the plugin
+
+Extract the downloaded zip to get `LoFiFxCameraMatch.ofx.bundle`. If building from source, the bundle is in `build/LoFiFxCameraMatch.ofx.bundle`.
+
+1. Save your project and quit DaVinci Resolve.
+2. In Finder, press **Cmd+Shift+G**, enter `/Library/OFX/Plugins/`, and move `LoFiFxCameraMatch.ofx.bundle` into that folder. Administrator permission may be required.
+3. Restart Resolve. Find **LoFi FX Camera Match** under **LoFi FX** in the OFX effects list.
+
+The beta is not notarized. If macOS blocks the downloaded plugin, use **System Settings → Privacy & Security → Allow Anyway** for this plugin, then restart Resolve.
+
+For an automated build and installation, use the script under **Install from source** below.
+
+## Using the plugin
+
+### 1. Prepare your chart footage
+
+Choose a chart frame from the reference camera and each comparison camera under the lighting you want to match. Avoid glare and shadows across the patches.
+
+Bring both cameras into **DaVinci Wide Gamut / DaVinci Intermediate** before the plugin. Place Camera Match before creative grading or display conversion. If Resolve color management already supplies this space, no extra conversion is needed.
+
+### 2. Capture your reference
+
+Add Camera Match to the reference clip. Select the **Chart model**, activate **Open FX Overlay** in Resolve’s viewer, and align the four corners around the supported color target. Adjust rotation or mirroring until the sample labels match the physical patches.
+
+Under **Capture**, enter a name in **Save reference as**, such as `Interview daylight`, then press **Capture reference**. The reference image stays unchanged.
+
+### 3. Match another camera
+
+Add Camera Match to the comparison camera’s chart frame. Enter your saved name in **Apply reference named**, select the same chart layout, and align its overlay.
+
+Press **Apply reference to this clip** to measure this camera and save its match. Repeat for each camera in the setup. **List captured references** shows the references available in the current session.
+
+### 4. Dial it in and reuse it
+
+Start with all three controls at 100%, compare the shots, and adjust to taste.
+
+| Control | What it does |
+| --- | --- |
+| **Reference match %** | Dials the overall correction. 0% leaves the image unchanged, 100% applies the fitted match, and up to 200% pushes it further. |
+| **Saturation match** | Dials the saturation change. 0% retains input relative saturation while keeping matched hue for chromatic colors. |
+| **Exposure match** | Dials the brightness change. 0% retains input luminance; 100% retains matched luminance. It follows the fitted correction rather than acting as a global Offset control. |
+
+Use **Bypass** for a before-and-after comparison. Check skin, highlights, and familiar objects beyond the chart, then copy the solved node to other shots from that camera and lighting setup. Capture a new named reference when the lighting changes.
+
+### Keeping a match up to date
+
+- After moving or resizing sample areas, recapture. After changing patch exclusions, use **Advanced → Refit captured samples** to update the match from saved measurements.
+- After changing exposure or color upstream, recapture the affected reference and/or press Apply reference again on the comparison chart frame. The saved match does not adapt automatically; Refit alone does not measure new pixels.
+- After reopening Resolve, solved nodes keep working. To make a saved reference available to fresh nodes, press **Advanced → Use this reference for other clips** on its reference node. Reselect Open FX Overlay if the guides are hidden.
+
+## Building from source
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+```
+
+Requires: Apple silicon macOS, CMake 3.20+, a C++17 compiler with macOS development tools, and an internet connection on the first build to fetch the OpenFX SDK headers.
+
+Output: `build/LoFiFxCameraMatch.ofx.bundle`
+
+To build and run the automated checks without installing or launching Resolve:
+
+```sh
+./build-and-launch.sh --build-only
+```
+
+## Install from source
 
 Save your Resolve project, then run:
 
@@ -10,42 +109,14 @@ Save your Resolve project, then run:
 ./build-and-launch.sh
 ```
 
-The script builds, runs the automated tests, installs the OFX bundle in `/Library/OFX/Plugins`, clears Resolve’s stale OFX cache, and opens Resolve. A first installation may require an administrator password; updates to a writable existing bundle do not. If Resolve is still running, the script waits for you to quit it before replacing the bundle. To check the build without installing or launching, run `./build-and-launch.sh --build-only`.
+The script builds, runs tests, installs the bundle in `/Library/OFX/Plugins`, clears the stale plugin cache, and launches Resolve. If Resolve is running, it waits for you to quit before replacing the bundle. A first installation may require an administrator password.
 
-## Build
+You can also copy the built bundle manually using **Installing the plugin** above. To uninstall, remove `/Library/OFX/Plugins/LoFiFxCameraMatch.ofx.bundle` and restart Resolve.
 
-Requires CMake 3.20+, a C++17 compiler, and the pinned OpenFX SDK commit `ab779510b2655b4d11a7e01e5c521f9aa8c88976` (OpenFX 1.5.1). CMake fetches the SDK headers on the first build.
+## Current status
 
-```sh
-cmake -S . -B build
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-```
+The plugin uses a single RBF model to match your chosen reference camera. Results depend on usable chart samples, accurate manual alignment, and comparable lighting. It does not automatically detect or track charts or continuously adapt a correction during playback. At very low or nonpositive luminance, the component controls retain the fitted result.
 
-The bundle is `build/LoFiFxCameraMatch.ofx.bundle`. This build targets macOS arm64. Resolve scans `/Library/OFX/Plugins` on this machine. The launch script installs there; the earlier user-level copy under `~/Library/OFX/Plugins` is not discovered. To uninstall, remove `/Library/OFX/Plugins/LoFiFxCameraMatch.ofx.bundle` with administrator permission and relaunch.
+Automated regression checks cover the model, GPU agreement, saved corrections, and controls. Complete Resolve workflow verification is still pending, and reported highlight artifacts remain unresolved. See [implementation status](docs/implementation-status.md), [the host checklist](docs/host-test-checklist.md), and [algorithm notes](docs/algorithm.md) for details.
 
-## Workflow
-
-1. Normalize reference and comparison clips to **DaVinci Wide Gamut / DaVinci Intermediate** upstream of Camera Match. Place Camera Match before creative grading, tone mapping, or display conversion. Do not add a second transform if Resolve color management already provides that space.
-2. On the reference chart frame, select the correct **Chart model** in **Color chart**. **Color Checker Passport Video** is the default and refers to its 24-patch video color target in the original main-branch layout of six rows and four columns, not its Classic, grayscale, or white-balance panel.
-3. In Resolve's Color page, select the Camera Match node and activate the viewer's **Open FX Overlay** tool. Keep **Show color chart overlay** enabled in **Color chart**. For Passport Video, place TL, TR, BR, and BL around the lower 24-patch color panel only; leave the upper three-bar grayscale panel outside the corners. The labels identify patch orientation. Set **Rotate chart** / **Mirror patch identity** as needed. The corner coordinate fields are hidden from the inspector. After reopening Resolve, select Open FX Overlay again if the guides are hidden.
-4. In Select patches mode, click a patch to include or exclude it. In Adjust samples mode, drag a sample center or one of its corners. Open **Advanced** for selected-patch controls, sample offsets and dimensions, global sample size, reset, and refit. The default sample size is the center 50% of each patch.
-5. In **Capture**, **Save reference as** is prefilled with the next available name (`ref1`, `ref2`, and so on). Keep it or edit it (for example, `Scene 1`), then press **Capture reference**. Capture each scene's reference under a different name. The reference node stays a pass-through carrier and registers that named reference for the current Resolve session.
-6. On a comparison clip, add a fresh Camera Match node. In **Apply reference adjustments**, enter the corresponding name in **Apply reference named**, select the same chart model, align the chart, and press **Apply reference to this clip**. It copies that named reference, measures the current Source clip, fits RBF, and saves the reference and correction in this node. **List captured references** displays the names currently registered. You can also copy a reference node to a comparison clip and press Apply reference with **Apply reference named** empty; the copied node uses its embedded reference.
-7. Repeat with another name for Scene 2. **Reference adjustments** exposes **Reference match %** (0–200%, default 100%), **Saturation match**, and **Exposure match** (both 0–100%, default 100%). Reference match 0 bypasses the correction; 100% applies the fitted result with the two component controls at 100%. RBF uses selected chart patches, including neutrals. Copy each solved node to other shots from that camera and lighting setup.
-
-After reopening Resolve, press **Use this reference for other clips** under **Advanced** on each saved reference node that you want to use with fresh nodes. Existing solved nodes keep their own saved reference and correction. Older reference nodes all named `Hero camera` can be assigned distinct names by editing **Save reference as** and pressing **Use this reference for other clips**; no new chart capture is needed. If Apply reference cannot find a name, register its saved reference or capture it again.
-
-Changing chart geometry after capture leaves the last correction active. Recapture to use new sample areas. Changing exclusions can be applied with **Refit captured samples** under **Advanced**. Refit uses the two saved captures; playback and rendering never remeasure or refit. Upstream exposure changes affect the incoming pixels but leave the saved fit unchanged. Recapture the affected reference and/or apply the reference again on the target chart frame to incorporate those changes. `Bypass` is exact pass-through. Older nodes saved with a removed matcher reuse their saved captures to obtain an RBF fit on load. A failed migration leaves the correction invalid; realign or recapture as needed.
-
-Version 0.17 restores the original Passport dimensions, patch identities, default selection, and orientation from main. **Recapture both reference and target for Passport nodes captured in 0.13–0.16** before applying a new match. Existing saved corrections continue rendering. Original main-branch captures remain compatible. For RBF nodes saved in 0.14, install 0.15, restart Resolve, and press **Advanced → Refit captured samples** to use the new native DI fit. Saved captures can be reused. Until refitted, 0.14 nodes retain their linear fit.
-
-See [the algorithm notes](docs/algorithm.md) for the fitted model and limits.
-
-## Current verification limits
-
-The code builds and passes the automated checks, including a Metal comparison against the CPU transform. The system-installed plugin has appeared in Resolve's LoFi FX group. The revised inspector groups and labels need direct host verification; capture, node copying, undo, save/reopen, and export need the same. Follow [the host test checklist](docs/host-test-checklist.md) before using the effect in a production project.
-
-Chart patch rectangles were traced from manufacturer imagery and still need alignment validation against physical targets. The manual input-space contract cannot detect an incorrectly normalized upstream clip. RBF evaluates its complete Gaussian/affine mapping directly on Metal. Fit-time neutral brightness checks reject demonstrated tonal folds, but do not guarantee smoothness on every chromatic trajectory or at extreme strengths. The reported highlight artifact remains unconfirmed by numerical regression checks.
-
-Both component controls at 100% preserve the exact weighted RBF output. At 0%, saturation retains input relative saturation while keeping matched hue for chromatic colors; exposure retains input scene-linear luminance. Intermediate exposure amounts blend a per-pixel luminance ratio in stops, rather than applying one global exposure gain. Signed or very low luminance retains the RBF result. See [the algorithm notes](docs/algorithm.md) for formulas, migration rules, and test coverage.
+For older projects, Passport captures from versions 0.13–0.16 need both observations recaptured because the layout changed.
