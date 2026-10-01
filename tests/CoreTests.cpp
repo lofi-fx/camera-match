@@ -9,7 +9,35 @@
 #include <cmath>
 #include <iostream>
 #include <vector>
+#include <sstream>
+#include <iomanip>
 using namespace cm;
+static std::string oldPayload(const Persistent &p, const std::string &tag, int oldKind = 2) {
+  std::string prefix = serialize(p);
+  prefix.resize(prefix.find_last_of(' ')); // checksum
+  for (int j = 0; j < 18 + p.solution.rbfCount * 6; ++j)
+    prefix.resize(prefix.find_last_of(' '));
+  prefix.replace(0, 3, tag);
+  std::ostringstream body;
+  body << std::setprecision(17) << prefix << ' ' << p.solution.valid;
+  for (int j = 0; j < 10; ++j) body << " 0";
+  body << ' ' << p.solution.neutralCount << ' ' << p.solution.colorCount << " 0";
+  if (tag != "CM2") body << ' ' << oldKind << " 0";
+  if (tag != "CM2" && tag != "CM3") {
+    const auto &x = p.solution;
+    body << ' ' << x.rbfCount << ' ' << x.rbfSupport;
+    for (int j = 0; j < x.rbfCount; ++j) {
+      auto c = x.rbfCenters[j], w = x.rbfWeights[j];
+      body << ' ' << c.r << ' ' << c.g << ' ' << c.b << ' ' << w.r << ' ' << w.g << ' ' << w.b;
+    }
+    for (auto v : x.rbfAffine) body << ' ' << v.r << ' ' << v.g << ' ' << v.b;
+    if (tag == "CM6") body << ' ' << int(x.rbfSpace);
+  }
+  std::string value = body.str();
+  uint64_t checksum = 14695981039346656037ull;
+  for (unsigned char c : value) { checksum ^= c; checksum *= 1099511628211ull; }
+  return value + " " + std::to_string(checksum);
+}
 int main() {
   Geometry g;
   g.corners = {{{100, 500}, {700, 470}, {650, 80}, {130, 100}}};
@@ -24,6 +52,18 @@ int main() {
   assert(!makeHomography(g).valid);
   assert(layout().size() == 30);
   assert(layout(1).size() == 24);
+  // Main's original Passport geometry and default selection must remain exact.
+  for (int row = 0; row < 6; ++row)
+    for (int col = 0; col < 4; ++col) {
+      const auto &p = layout(1)[row * 4 + col];
+      double x = .025 + col * .245, y = .018 + row * .164;
+      assert(p.box.x1 == x && p.box.y1 == y);
+      assert(p.box.x2 == x + .205 && p.box.y2 == y + .13);
+      assert(p.defaultIncluded == (col < 3));
+      assert(p.role == (col == 0 ? Role::Chromatic : col == 1 ? Role::Skin
+                         : col == 2 ? Role::Neutral : row == 5 ? Role::Glossy
+                         : Role::Illumination));
+    }
   assert(layout(2).size() == 24);
   assert(layout(2)[0].box.y1 == layout(2)[5].box.y1);
   assert(layout(2)[6].box.y1 > layout(2)[0].box.y1);
@@ -64,32 +104,12 @@ int main() {
   Persistent restored;
   assert(deserialize(serialize(received), restored));
   assert(restored.hero.name == "Hero A" && restored.hero.revision == 7);
-  std::string oldBody = serialize(received);
-  oldBody.resize(oldBody.find_last_of(' '));
-  for (int j = 0; j < 17; ++j)
-    oldBody.resize(oldBody.find_last_of(' '));
-  oldBody.replace(0, 3, "CM2");
-  uint64_t oldHash = 14695981039346656037ull;
-  for (unsigned char c : oldBody) {
-    oldHash ^= c;
-    oldHash *= 1099511628211ull;
+  for (const char *tag : {"CM2", "CM3", "CM4", "CM5", "CM6"}) {
+    Persistent olderReference;
+    assert(deserialize(oldPayload(received, tag, 0), olderReference));
+    assert(olderReference.hasHero && !olderReference.hasTarget);
+    assert(olderReference.hero.name == received.hero.name);
   }
-  Persistent legacy;
-  assert(deserialize(oldBody + " " + std::to_string(oldHash), legacy));
-  assert(legacy.solution.method == MatchMethod::Harmonic);
-  std::string cm3Body = serialize(received);
-  cm3Body.resize(cm3Body.find_last_of(' '));
-  for (int j = 0; j < 15; ++j)
-    cm3Body.resize(cm3Body.find_last_of(' '));
-  cm3Body.replace(0, 3, "CM3");
-  uint64_t cm3Hash = 14695981039346656037ull;
-  for (unsigned char c : cm3Body) {
-    cm3Hash ^= c;
-    cm3Hash *= 1099511628211ull;
-  }
-  Persistent prior;
-  assert(deserialize(cm3Body + " " + std::to_string(cm3Hash), prior));
-  assert(prior.solution.method == MatchMethod::Harmonic);
   Persistent p;
   p.hasHero = true;
   p.hero.name = "Test hero";
@@ -100,21 +120,6 @@ int main() {
   assert(parsed.hero.name == p.hero.name);
   encoded[15] = 'x';
   assert(!deserialize(encoded, parsed));
-  Solution s;
-  s.valid = true;
-  s.hue = {.1, .02, -.03};
-  s.sat = {.2, .01, .02};
-  s.neutralLog = {.1, -.05, -.05};
-  s.stops = 1;
-  RGB input = encode(x);
-  Amounts a;
-  a.exposure = 0;
-  auto output = decode(transform(input, s, a));
-  assert(std::abs(luminance(output) - luminance(x)) < 1e-6);
-  a = {0, 0, 0, 0, false};
-  auto identity = transform(input, s, a);
-  assert(identity.r == input.r && identity.g == input.g &&
-         identity.b == input.b);
   float rows[2][16]{};
   FloatImageView view{&rows[1][0], 10, 20, 12, 22, -int(sizeof(rows[0])), 4};
   view.at(10, 20)[0] = 1;
@@ -187,15 +192,6 @@ int main() {
       hero.patch[j].rgb = v * 2;
       target.patch[j].valid = hero.patch[j].valid = 100;
     }
-    auto fit = solve(hero, target, geo);
-    assert(fit.solution.valid);
-    assert(std::abs(fit.solution.stops - 1) < 1e-8);
-    Amounts exp{0, 0, 1, 0, false};
-    RGB doubled = decode(transform(encode(colors[0]), fit.solution, exp));
-    assert(std::abs(doubled.r - 2 * colors[0].r) < 1e-6);
-    exp.exposure = .5;
-    RGB half = decode(transform(encode(colors[0]), fit.solution, exp));
-    assert(std::abs(half.r - std::sqrt(2) * colors[0].r) < 1e-6);
     size_t chosen = 0;
     while (chosen < layout(model).size() &&
            layout(model)[chosen].role != Role::Chromatic)
@@ -206,59 +202,18 @@ int main() {
     double chroma = std::hypot(shifted.a, shifted.b);
     hero.patch[chosen].rgb = fromOklab(
         {shifted.L, chroma * std::cos(angle), chroma * std::sin(angle)});
-    auto radial = solve(hero, target, geo, MatchMethod::RadialLegacy);
-    assert(radial.solution.valid && radial.solution.radialCount >= 4);
-    auto harmonic = solve(hero, target, geo, MatchMethod::Harmonic);
-    assert(harmonic.solution.valid);
-    auto lut = makeRadialLut(radial.solution);
-    Amounts chromatic{1, 1, 0, 0, false, 1};
-    auto direct = transform(encode(target.patch[chosen].rgb),
-                            radial.solution, chromatic);
-    auto cached = transform(encode(target.patch[chosen].rgb),
-                            radial.solution, chromatic, &lut);
-    auto broad = transform(encode(target.patch[chosen].rgb),
-                           harmonic.solution, chromatic);
-    assert(std::abs(broad.r - cached.r) + std::abs(broad.g - cached.g) +
-               std::abs(broad.b - cached.b) > 1e-4);
-    assert(std::abs(direct.r - cached.r) < .003);
-    assert(std::abs(direct.g - cached.g) < .003);
-    assert(std::abs(direct.b - cached.b) < .003);
-    chromatic.biasWeight = 0;
-    auto zero = transform(encode(target.patch[chosen].rgb),
-                          radial.solution, chromatic, &lut);
-    RGB original = encode(target.patch[chosen].rgb);
-    assert(std::abs(zero.r - original.r) < 1e-6);
-    Persistent savedRadial;
-    savedRadial.hasHero = savedRadial.hasTarget = true;
     hero.geometry = target.geometry = geo;
-    for (auto &patch : hero.patch)
-      patch.candidate = patch.valid;
-    for (auto &patch : target.patch)
-      patch.candidate = patch.valid;
-    savedRadial.hero = hero;
-    savedRadial.target = target;
-    savedRadial.solution = radial.solution;
-    Persistent reopened;
-    assert(deserialize(serialize(savedRadial), reopened));
-    assert(reopened.solution.method == MatchMethod::RadialLegacy);
-    assert(reopened.solution.radialCount == radial.solution.radialCount);
-    std::string legacyRadial = serialize(savedRadial);
-    legacyRadial.resize(legacyRadial.find_last_of(' '));
-    for (int j = 0; j < 15; ++j)
-      legacyRadial.resize(legacyRadial.find_last_of(' '));
-    legacyRadial.replace(0, 3, "CM3");
-    uint64_t checksum = 14695981039346656037ull;
-    for (unsigned char c : legacyRadial) {
-      checksum ^= c;
-      checksum *= 1099511628211ull;
-    }
-    assert(deserialize(legacyRadial + " " + std::to_string(checksum), reopened));
-    assert(reopened.solution.method == MatchMethod::RadialLegacy);
-    auto rbf = solve(hero, target, geo, MatchMethod::Rbf);
+    for (auto &patch : hero.patch) patch.candidate = patch.valid;
+    for (auto &patch : target.patch) patch.candidate = patch.valid;
+    auto rbf = solve(hero, target, geo);
     assert(rbf.solution.valid && rbf.solution.rbfCount >= 7);
+    Persistent saved;
+    saved.hasHero = saved.hasTarget = true;
+    saved.hero = hero; saved.target = target; saved.solution = rbf.solution;
+    Persistent reopened;
     RGB source = encode(target.patch[chosen].rgb);
     RGB wanted = encode(hero.patch[chosen].rgb);
-    Amounts rbfAmount{0, 0, 0, 0, false, 1};
+    Amounts rbfAmount;
     RGB fitted = transform(source, rbf.solution, rbfAmount);
     double fittedError = std::abs(fitted.r - wanted.r) +
                          std::abs(fitted.g - wanted.g) +
@@ -288,25 +243,23 @@ int main() {
     rbfAmount.biasWeight = 0;
     RGB noRbf = transform(source, rbf.solution, rbfAmount);
     assert(noRbf.r == source.r && noRbf.g == source.g && noRbf.b == source.b);
-    savedRadial.solution = rbf.solution;
-    assert(deserialize(serialize(savedRadial), reopened));
-    assert(reopened.solution.method == MatchMethod::Rbf);
+    assert(deserialize(serialize(saved), reopened));
     assert(reopened.solution.rbfCount == rbf.solution.rbfCount);
-    Persistent oldRbf = savedRadial;
-    oldRbf.solution.rbfCenters[0] = {9, 9, 9};
-    std::string oldRbfBody = serialize(oldRbf);
-    oldRbfBody.resize(oldRbfBody.find_last_of(' '));
-    oldRbfBody.resize(oldRbfBody.find_last_of(' ')); // CM6 space tag
-    oldRbfBody.replace(0, 3, "CM4");
-    uint64_t oldRbfHash = 14695981039346656037ull;
-    for (unsigned char c : oldRbfBody) {
-      oldRbfHash ^= c;
-      oldRbfHash *= 1099511628211ull;
+    for (const char *tag : {"CM4", "CM5", "CM6"}) {
+      assert(deserialize(oldPayload(saved, tag), reopened));
+      assert(reopened.solution.valid);
+      assert(reopened.solution.rbfCount == rbf.solution.rbfCount);
+      assert(reopened.solution.rbfCenters[0].r == rbf.solution.rbfCenters[0].r);
+      if (std::string(tag) == "CM6") {
+        RGB preserved = transform(source, reopened.solution, Amounts{});
+        assert(preserved.r == fitted.r && preserved.g == fitted.g && preserved.b == fitted.b);
+      }
     }
-    assert(deserialize(oldRbfBody + " " + std::to_string(oldRbfHash), reopened));
-    assert(reopened.solution.valid);
-    assert(std::abs(reopened.solution.rbfCenters[0].r -
-                    rbf.solution.rbfCenters[0].r) < 1e-10);
+    // Old solved payloads migrate from saved captures, with no old renderer.
+    for (const char *tag : {"CM2", "CM3", "CM6"}) {
+      assert(deserialize(oldPayload(saved, tag, 0), reopened));
+      assert(reopened.solution.valid && reopened.solution.rbfCount >= 7);
+    }
   }
   for (int rot = 0; rot < 4; rot++)
     for (bool mirror : {false, true}) {
@@ -314,48 +267,6 @@ int main() {
       Point r = unorient(orient(q, rot, mirror), rot, mirror);
       assert(std::hypot(q.x - r.x, q.y - r.y) < 1e-12);
     }
-  for (double hue : {0., .35, 1.})
-    for (double sat : {0., .6, 1.}) {
-      Amounts noEx{hue, sat, 0, 0, false}, fullEx{hue, sat, 1, 0, false};
-      RGB a = decode(transform(input, s, noEx)),
-          b = decode(transform(input, s, fullEx));
-      assert(std::abs(b.r - 2 * a.r) < 1e-6);
-      assert(std::abs(b.g - 2 * a.g) < 1e-6);
-      assert(std::abs(b.b - 2 * a.b) < 1e-6);
-    }
-  for (int hue = 0; hue < 2; hue++)
-    for (int sat = 0; sat < 2; sat++)
-      for (int ex = 0; ex < 2; ex++) {
-        Amounts controls{double(hue), double(sat), double(ex), 0, false};
-        RGB z = transform(input, s, controls);
-        assert(finite(z));
-        if (!ex)
-          assert(std::abs(luminance(decode(z)) - luminance(x)) < 1e-6);
-      }
-  for (RGB v : {RGB{-0.1, .02, .01}, RGB{0, 0, 0}, RGB{3, 2, 5}}) {
-    auto z = transform(encode(v), s, Amounts{});
-    assert(finite(z));
-  }
-  Solution local;
-  local.valid = true;
-  local.method = MatchMethod::RadialLegacy;
-  local.radialCount = 1;
-  local.radial[0] = {.2, .0833333333, .2, 0, 1};
-  auto localLut = makeRadialLut(local);
-  RGB near = encode(fromOklab({.6, .12, .05}));
-  RGB far = encode(fromOklab({.6, -.12, -.05}));
-  Amounts localAmount{1, 0, 0, 0, false, 1};
-  auto hueShift = [](RGB before, RGB after) {
-    auto a = toOklab(decode(before)), b = toOklab(decode(after));
-    return std::abs(std::remainder(std::atan2(b.b, b.a) -
-                                   std::atan2(a.b, a.a), 2 * M_PI));
-  };
-  assert(hueShift(near, transform(near, local, localAmount, &localLut)) >
-         hueShift(far, transform(far, local, localAmount, &localLut)) + .05);
-  localAmount.biasWeight = 0;
-  auto unchanged = transform(near, local, localAmount, &localLut);
-  assert(unchanged.r == near.r && unchanged.g == near.g &&
-         unchanged.b == near.b);
   // Golden values from Color Workspace's DWG/DI preset (encode linear
   // captures before fit_rbf_model and evaluate encoded probes), with support
   // 0.1, regularization 0.2, and a pinned black anchor.
@@ -382,8 +293,7 @@ int main() {
     pythonHero.patch[j].rgb = pythonSource[j] + pythonDelta[j];
     pythonTarget.patch[j].valid = pythonHero.patch[j].valid = 100;
   }
-  auto pythonFit = solve(pythonHero, pythonTarget, pythonGeometry,
-                         MatchMethod::Rbf);
+  auto pythonFit = solve(pythonHero, pythonTarget, pythonGeometry);
   assert(pythonFit.solution.valid && pythonFit.solution.rbfCount == 9);
   const std::array<RGB, 5> probes = {{{.1, .15, .2},
                                       {.30, .27, .2},
@@ -397,16 +307,16 @@ int main() {
       {0.666802519901306, 0.648190970061679, 0.629744778835783}}};
   for (size_t j = 0; j < probes.size(); ++j) {
     RGB actual = transform(encode(probes[j]), pythonFit.solution,
-                           Amounts{0, 0, 0, 0, false, 1});
+                           Amounts{});
     assert(std::abs(actual.r - expected[j].r) < 1e-11);
     assert(std::abs(actual.g - expected[j].g) < 1e-11);
     assert(std::abs(actual.b - expected[j].b) < 1e-11);
   }
   assert(pythonFit.solution.rbfSpace == RbfSpace::Intermediate);
   // An identity fit must preserve fine steps, including negatives and HDR.
-  auto identityFit = solve(pythonTarget, pythonTarget, pythonGeometry, MatchMethod::Rbf);
+  auto identityFit = solve(pythonTarget, pythonTarget, pythonGeometry);
   assert(identityFit.solution.valid);
-  Amounts full{0, 0, 0, 0, false, 1};
+  Amounts full;
   RGB previous{};
   for (int j = 0; j <= 65536; ++j) {
     double v = -.1 + 1.4 * j / 65536.;
@@ -431,20 +341,62 @@ int main() {
   legacyLinear.hasHero = legacyLinear.hasTarget = true;
   legacyLinear.solution = pythonFit.solution;
   legacyLinear.solution.rbfSpace = RbfSpace::Linear;
-  std::string cm5 = serialize(legacyLinear);
-  cm5.resize(cm5.find_last_of(' ')); // checksum
-  cm5.resize(cm5.find_last_of(' ')); // CM6 space
-  cm5.replace(0, 3, "CM5");
-  uint64_t cm5Hash = 14695981039346656037ull;
-  for (unsigned char c : cm5) { cm5Hash ^= c; cm5Hash *= 1099511628211ull; }
   Persistent reopenedLinear;
-  assert(deserialize(cm5 + " " + std::to_string(cm5Hash), reopenedLinear));
+  assert(deserialize(oldPayload(legacyLinear, "CM5"), reopenedLinear));
   assert(reopenedLinear.solution.rbfSpace == RbfSpace::Linear);
   RGB before = transform({.3, .4, .5}, legacyLinear.solution, full);
   RGB after = transform({.3, .4, .5}, reopenedLinear.solution, full);
   assert(before.r == after.r && before.g == after.g && before.b == after.b);
   assert(deserialize(serialize(reopenedLinear), reopenedLinear));
   assert(reopenedLinear.solution.rbfSpace == RbfSpace::Linear);
+  // RBF component amounts act on a single known mapping. Full amounts must
+  // be exact, saturation must retain mapped hue, exposure must control Y.
+  RGB amountSource = {.21, .12, .075};
+  Lab amountLab = toOklab(amountSource);
+  double angle = .2, sourceC = std::hypot(amountLab.a, amountLab.b);
+  double targetHue = std::atan2(amountLab.b, amountLab.a) + angle;
+  RGB amountTarget = fromOklab({amountLab.L, sourceC * 1.5 * std::cos(targetHue),
+                               sourceC * 1.5 * std::sin(targetHue)});
+  amountTarget = amountTarget * (luminance(amountSource) * 1.7 / luminance(amountTarget));
+  Solution componentFit;
+  componentFit.valid = true;
+  componentFit.rbfSpace = RbfSpace::Linear;
+  componentFit.rbfCount = 1;
+  componentFit.rbfSupport = .1;
+  componentFit.rbfAffine[0] = amountTarget;
+  RGB encodedSource = encode(amountSource);
+  RGB complete = transform(encodedSource, componentFit, Amounts{});
+  RGB encodedTarget = encode(amountTarget);
+  assert(complete.r == encodedTarget.r && complete.g == encodedTarget.g && complete.b == encodedTarget.b);
+  auto relativeSat = [](RGB rgb) {
+    Lab l = toOklab(rgb); return std::hypot(l.a, l.b) / l.L;
+  };
+  for (double saturation : {0., .5, 1.})
+    for (double exposure : {0., .5, 1.}) {
+      Amounts controls;
+      controls.rbfSat = saturation;
+      controls.rbfExposure = exposure;
+      RGB result = decode(transform(encodedSource, componentFit, controls));
+      double wantedY = luminance(amountSource) * std::pow(1.7, exposure);
+      assert(std::abs(luminance(result) - wantedY) < 1e-9);
+      double wantedSat = relativeSat(amountSource) * (1-saturation) + relativeSat(amountTarget) * saturation;
+      assert(std::abs(relativeSat(result) - wantedSat) < 1e-6);
+      Lab l = toOklab(result);
+      assert(std::abs(std::remainder(std::atan2(l.b,l.a) - targetHue, 2*M_PI)) < 1e-6);
+    }
+  Amounts zeroWeight;
+  zeroWeight.biasWeight = 0;
+  zeroWeight.rbfSat = zeroWeight.rbfExposure = 0;
+  RGB bypassed = transform(encodedSource, componentFit, zeroWeight);
+  assert(bypassed.r == encodedSource.r && bypassed.g == encodedSource.g && bypassed.b == encodedSource.b);
+  // Nonpositive-luminance values retain the signed RBF output at all amounts.
+  componentFit.rbfAffine[0] = {-.02, -.02, -.02};
+  Amounts partial;
+  partial.rbfSat = partial.rbfExposure = 0;
+  RGB signedFull = transform(encodedSource, componentFit, Amounts{});
+  RGB signedPartial = transform(encodedSource, componentFit, partial);
+  assert(signedFull.r == signedPartial.r && signedFull.g == signedPartial.g && signedFull.b == signedPartial.b);
+
   // Real capture regression: a rotated sampling grid produced a smooth RBF
   // with a reversal in shadow brightness. Do not accept it as a usable fit.
   const double foldingPairs[24][6] = {
@@ -484,7 +436,7 @@ int main() {
     foldingHero.patch[j].rgb = {v[3], v[4], v[5]};
     foldingHero.patch[j].valid = foldingTarget.patch[j].valid = 100;
   }
-  auto folding = solve(foldingHero, foldingTarget, foldingGeometry, MatchMethod::Rbf);
+  auto folding = solve(foldingHero, foldingTarget, foldingGeometry);
   assert(!folding.solution.valid);
   assert(folding.error.find("brightness reverses") != std::string::npos);
   std::cout << "core checks passed\n";

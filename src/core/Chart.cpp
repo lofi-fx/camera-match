@@ -8,6 +8,7 @@ namespace cm {
 // y=104..315. Skin column: 6; narrow neutral ramp: 6; large gray blocks: 4;
 // primary columns: 12; corner checks: 4.
 const std::vector<Patch> &layout(int model) {
+  // Retain the 0.13–0.16 layout only to interpret saved captures.
   if (model == 2) {
     static const std::vector<Patch> passport = []() {
       std::vector<Patch> a;
@@ -31,7 +32,7 @@ const std::vector<Patch> &layout(int model) {
     return passport;
   }
   if (model == 1) {
-    static const std::vector<Patch> legacyPassport = []() {
+    static const std::vector<Patch> passportOriginal = []() {
       std::vector<Patch> a;
       static const char *ids[24] = {
           "Color 1", "Skin 1",  "Gray 1",  "Check 1", "Color 2",
@@ -53,7 +54,7 @@ const std::vector<Patch> &layout(int model) {
         }
       return a;
     }();
-    return legacyPassport;
+    return passportOriginal;
   }
   static const std::vector<Patch> v = [] {
     std::vector<Patch> a;

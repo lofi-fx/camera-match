@@ -64,7 +64,6 @@ struct Instance {
   struct RenderSnapshot {
     std::string payload;
     Solution solution;
-    std::shared_ptr<const RadialLut> lut;
   };
   std::shared_ptr<const RenderSnapshot> renderSnapshot;
 };
@@ -222,7 +221,7 @@ void decodeGeometry(const std::string &text, Geometry &g) {
 }
 Geometry geometry(OfxParamSetHandle ps) {
   Geometry g;
-  g.model = gi(ps, "chartModel") == 1 ? 2 : 0;
+  g.model = gi(ps, "chartModel");
   auto &patches = layout(g.model);
   for (size_t j = 0; j < g.included.size(); ++j)
     g.included[j] = j < patches.size() ? patches[j].defaultIncluded : false;
@@ -265,20 +264,6 @@ std::string trimName(std::string name) {
   name.erase(std::find_if(name.rbegin(), name.rend(), nonspace).base(),
              name.end());
   return name;
-}
-void updateMatchControls(OfxParamSetHandle ps) {
-  bool radial = gi(ps, "matchMethod") == 1;
-  for (const char *name : {"biasWeight", "hue", "sat", "exposure", "neutral"}) {
-    auto p = param(ps, name);
-    OfxPropertySetHandle properties = nullptr;
-    if (p && params->paramGetPropertySet(p, &properties) == kOfxStatOK)
-      prop->propSetInt(properties, kOfxParamPropSecret, 0,
-                       std::strcmp(name, "biasWeight") == 0 ? !radial : radial);
-  }
-}
-MatchMethod selectedMatchMethod(OfxParamSetHandle ps) {
-  return gi(ps, "matchMethod") == 1 ? MatchMethod::Rbf
-                                     : MatchMethod::Harmonic;
 }
 void claimReferenceName(Instance *inst, const std::string &name) {
   std::lock_guard<std::mutex> lock(referenceNameMutex);
@@ -334,7 +319,7 @@ void referenceStatus(OfxParamSetHandle ps, const Persistent &s) {
 void patchReport(OfxParamSetHandle ps) {
   auto s = state(ps);
   int j = gi(ps, "patchSelector");
-  int model = gi(ps, "chartModel") == 1 ? 2 : 0;
+  int model = gi(ps, "chartModel");
   if (j < 0 || j >= int(layout(model).size())) {
     ss(ps, "patchReport", "No patch selected");
     return;
@@ -355,11 +340,8 @@ void patchReport(OfxParamSetHandle ps) {
         o.precision(2);
         o << " · exposure " << std::log2(y1 / y2) << " stops";
       }
-      bool radial = s.solution.method == MatchMethod::RadialLegacy;
-      Amounts a{radial ? 1. : gd(ps, "hue", 100) / 100.,
-                radial ? 1. : gd(ps, "sat", 100) / 100.,
-                gd(ps, "exposure", 100) / 100., gd(ps, "neutral", 100) / 100.,
-                false, gd(ps, "biasWeight", 100) / 100.};
+      Amounts a{false, gd(ps, "biasWeight", 100) / 100.,
+                gd(ps, "rbfSat", 100) / 100., gd(ps, "rbfExposure", 100) / 100.};
       RGB after = decode(transform(encode(p.rgb), s.solution, a));
       Lab before = toOklab(p.rgb), fit = toOklab(after),
           hero = toOklab(s.hero.patch[j].rgb);
@@ -551,26 +533,14 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       Persistent parsed;
       if (deserialize(saved, parsed))
         next->solution = parsed.solution;
-      if (next->solution.method == MatchMethod::RadialLegacy &&
-          next->solution.radialCount > 0)
-        next->lut = std::make_shared<RadialLut>(makeRadialLut(next->solution));
       inst->renderSnapshot = next;
     }
     snapshot = inst->renderSnapshot;
   }
   const auto &s = snapshot->solution;
-  bool radial = s.method == MatchMethod::RadialLegacy;
-  Amounts a{radial ? 1. : gd(ps, "hue", 100) / 100.,
-            radial ? 1. : gd(ps, "sat", 100) / 100.,
-            gd(ps, "exposure", 100) / 100., gd(ps, "neutral", 100) / 100.,
-            gi(ps, "bypass") != 0, gd(ps, "biasWeight", 100) / 100.};
-  bool exactCopy =
-      (a.bypass || !s.valid ||
-       (s.method == MatchMethod::Rbf
-            ? a.biasWeight == 0
-            : ((a.hue == 0 && a.sat == 0 ||
-                (s.method == MatchMethod::RadialLegacy && a.biasWeight == 0)) &&
-               a.exposure == 0 && a.neutral == 0))) &&
+  Amounts a{gi(ps, "bypass") != 0, gd(ps, "biasWeight", 100) / 100.,
+            gd(ps, "rbfSat", 100) / 100., gd(ps, "rbfExposure", 100) / 100.};
+  bool exactCopy = (a.bypass || !s.valid || a.biasWeight == 0) &&
       src.components == dst.components && src.premult == dst.premult;
   OfxRectI win = dst.bounds;
   prop->propGetIntN(args, kOfxImageEffectPropRenderWindow, 4, &win.x1);
@@ -582,10 +552,6 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     prop->propGetPointer(args, kOfxImageEffectPropMetalCommandQueue, 0,
                          &queue);
     MetalParams m{};
-    for (int j = 0; j < 3; ++j) {
-      m.hue[j] = float(s.hue[j]);
-      m.sat[j] = float(s.sat[j]);
-    }
     for (int j = 0; j < std::min(s.rbfCount, 32); ++j) {
       const RGB &center = s.rbfCenters[j], &weight = s.rbfWeights[j];
       m.rbfCenter[j][0] = float(center.r);
@@ -606,16 +572,9 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     m.rbfInvSupportSq = s.rbfSupport > 0
                             ? float(1. / (s.rbfSupport * s.rbfSupport))
                             : 0.f;
-    m.neutral[0] = float(s.neutralLog.r);
-    m.neutral[1] = float(s.neutralLog.g);
-    m.neutral[2] = float(s.neutralLog.b);
-    m.stops = float(s.stops);
-    m.hueAmount = float(a.hue);
-    m.satAmount = float(a.sat);
-    m.exposureAmount = float(a.exposure);
-    m.neutralAmount = float(a.neutral);
+    m.satAmount = float(a.rbfSat);
+    m.exposureAmount = float(a.rbfExposure);
     m.biasWeight = float(a.biasWeight);
-    m.method = int(s.method);
     m.srcX = src.bounds.x1; m.srcY = src.bounds.y1;
     m.srcW = src.bounds.x2 - src.bounds.x1;
     m.srcH = src.bounds.y2 - src.bounds.y1;
@@ -631,7 +590,7 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     m.srcPremult = src.premult;
     m.dstPremult = dst.premult;
     m.exactCopy = exactCopy;
-    return renderMetal(queue, src.data, dst.data, m, snapshot->lut.get()) ? kOfxStatOK
+    return renderMetal(queue, src.data, dst.data, m) ? kOfxStatOK
                                                     : kOfxStatGPURenderFailed;
   }
 #endif
@@ -655,7 +614,7 @@ OfxStatus render(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       double alpha = src.components == 4 ? p[3] : 1.0;
       if (src.premult && alpha > 1e-6)
         rgb = rgb / alpha;
-      RGB z = transform(rgb, s, a, snapshot->lut.get());
+      RGB z = transform(rgb, s, a);
       if (dst.premult)
         z = z * alpha;
       d[0] = float(z.r);
@@ -1104,36 +1063,6 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     redrawOverlays(inst, name == "showOverlay");
     return kOfxStatOK;
   };
-  if (name == "matchMethod") {
-    updateMatchControls(ps);
-    auto s = state(ps);
-    if (s.hasHero && s.hasTarget) {
-      if (s.hero.chartModel == 1 && geometry(ps).model == 2) {
-        status(ps, "Passport patch layout was corrected. Recapture the reference and target.");
-        return done();
-      }
-      auto fit = solve(s.hero, s.target, geometry(ps), selectedMatchMethod(ps));
-      if (!fit.solution.valid) {
-        status(ps, fit.error);
-        return done();
-      }
-      s.solution = fit.solution;
-      EditGroup edit(ps, "Change match method");
-      if (!commitState(ps, s)) {
-        status(ps, "Could not save the selected match method");
-        return done();
-      }
-      status(ps, std::string("Applied ") +
-                     (fit.solution.method == MatchMethod::Rbf
-                          ? "RBF match"
-                          : "existing match") +
-                     (fit.error.empty() ? "" : " · " + fit.error));
-      patchReport(ps);
-    } else {
-      status(ps, "Match method selected. Apply a reference to this clip.");
-    }
-    return done();
-  }
   if (name == "showOverlay") {
     status(ps, gi(ps, "showOverlay")
                    ? "Overlay requested. If guides stay hidden, select Open FX Overlay beneath the viewer."
@@ -1204,8 +1133,8 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     }
     Geometry g = geometry(ps);
     if (name == "analyze" && s.hero.chartModel != g.model) {
-      status(ps, s.hero.chartModel == 1 && g.model == 2
-                     ? "Passport patch layout was corrected. Recapture the reference before applying."
+      status(ps, s.hero.chartModel == 2 && g.model == 1
+                     ? "Passport layout restored from main. Recapture the reference before applying."
                      : "Reference chart model differs. Select the same chart model before applying.");
       return done();
     }
@@ -1230,7 +1159,7 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     } else {
       c.name = "Camera at frame " + std::to_string(int(c.time));
       c.revision = s.hasTarget ? s.target.revision + 1 : 1;
-      auto fit = solve(s.hero, c, g, selectedMatchMethod(ps));
+      auto fit = solve(s.hero, c, g);
       if (!fit.solution.valid) {
         status(ps, fit.error);
         return done();
@@ -1240,8 +1169,7 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
       s.solution = fit.solution;
       std::ostringstream o;
       o << "Applied reference " << s.hero.name << " ("
-        << (fit.solution.method == MatchMethod::Rbf ? "RBF match"
-                                                   : "existing match")
+        << "RBF match"
         << "): " << fit.solution.neutralCount
         << " neutral, " << fit.solution.colorCount << " color patches";
       if (!fit.error.empty())
@@ -1265,11 +1193,11 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
   if (name == "refit") {
     auto s = state(ps);
     if (s.hasHero && s.hasTarget) {
-      if (s.hero.chartModel == 1 && geometry(ps).model == 2) {
-        status(ps, "Passport patch layout was corrected. Recapture the reference and target.");
+      if (s.hero.chartModel == 2 && geometry(ps).model == 1) {
+        status(ps, "Passport layout restored from main. Recapture the reference and target.");
         return done();
       }
-      auto fit = solve(s.hero, s.target, geometry(ps), selectedMatchMethod(ps));
+      auto fit = solve(s.hero, s.target, geometry(ps));
       if (fit.solution.valid) {
         EditGroup edit(ps, "Refit camera match");
         s.solution = fit.solution;
@@ -1379,8 +1307,7 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
     patchReport(ps);
     return done();
   }
-  if (name == "hue" || name == "sat" || name == "exposure" ||
-      name == "neutral") {
+  if (name == "biasWeight" || name == "rbfSat" || name == "rbfExposure") {
     patchReport(ps);
     return done();
   }
@@ -1440,8 +1367,6 @@ OfxStatus describeContext(OfxImageEffectHandle e) {
   define(ps, kOfxParamTypeString, "heroToApply", "Apply reference named");
   parent(ps, "heroToApply", "applyGroup");
   prop->propSetString(desc(ps, "heroToApply"), kOfxParamPropDefault, 0, "");
-  choice(ps, "matchMethod", "Match method", {"Existing match", "RBF match"});
-  parent(ps, "matchMethod", "applyGroup");
   define(ps, kOfxParamTypePushButton, "analyze",
          "Apply reference to this clip");
   parent(ps, "analyze", "applyGroup");
@@ -1465,6 +1390,7 @@ OfxStatus describeContext(OfxImageEffectHandle e) {
   choice(ps, "rotation", "Rotate chart",
          {"0 degrees", "90 degrees", "180 degrees", "270 degrees"});
   parent(ps, "rotation", "colorChartGroup");
+  prop->propSetInt(desc(ps, "rotation"), kOfxParamPropDefault, 0, 0);
   define(ps, kOfxParamTypeBoolean, "mirror", "Mirror patch identity");
   parent(ps, "mirror", "colorChartGroup");
   prop->propSetInt(desc(ps, "mirror"), kOfxParamPropDefault, 0, 0);
@@ -1472,18 +1398,16 @@ OfxStatus describeContext(OfxImageEffectHandle e) {
   define(ps, kOfxParamTypeGroup, "adjustmentsGroup",
          "Reference adjustments");
   prop->propSetInt(desc(ps, "adjustmentsGroup"), kOfxParamPropGroupOpen, 0, 1);
-  for (auto pair : {std::pair<const char *, const char *>{"hue", "Hue match"},
-                    {"sat", "Saturation match"},
-                    {"exposure", "Exposure match"},
-                    {"neutral", "Neutral balance match"}}) {
+  define(ps, kOfxParamTypeDouble, "biasWeight", "Reference match %");
+  parent(ps, "biasWeight", "adjustmentsGroup");
+  defaultDouble(ps, "biasWeight", 100, 0, 200);
+
+  for (auto pair : {std::pair<const char *, const char *>{"rbfSat", "Saturation match"},
+                    {"rbfExposure", "Exposure match"}}) {
     define(ps, kOfxParamTypeDouble, pair.first, pair.second);
     parent(ps, pair.first, "adjustmentsGroup");
     defaultDouble(ps, pair.first, 100, 0, 100);
   }
-  define(ps, kOfxParamTypeDouble, "biasWeight", "RBF weight %");
-  parent(ps, "biasWeight", "adjustmentsGroup");
-  defaultDouble(ps, "biasWeight", 100, 0, 200);
-  prop->propSetInt(desc(ps, "biasWeight"), kOfxParamPropSecret, 0, 1);
 
   define(ps, kOfxParamTypeBoolean, "bypass", "Bypass");
   prop->propSetInt(desc(ps, "bypass"), kOfxParamPropDefault, 0, 0);
@@ -1521,10 +1445,10 @@ OfxStatus describeContext(OfxImageEffectHandle e) {
   define(ps, kOfxParamTypeString, geoPayload, "Geometry data");
   prop->propSetInt(desc(ps, geoPayload), kOfxParamPropSecret, 0, 1);
   Geometry defaultGeometry;
-  defaultGeometry.model = 2;
+  defaultGeometry.model = 1;
   for (size_t j = 0; j < defaultGeometry.included.size(); ++j)
     defaultGeometry.included[j] =
-        j < layout(2).size() ? layout(2)[j].defaultIncluded : false;
+        j < layout(1).size() ? layout(1)[j].defaultIncluded : false;
   prop->propSetString(desc(ps, geoPayload), kOfxParamPropDefault, 0,
                       encodeGeometry(defaultGeometry).c_str());
   define(ps, kOfxParamTypeChoice, "patchSelector", "Selected patch");
@@ -1602,13 +1526,9 @@ OfxStatus mainEntry(const char *action, const void *handle,
       auto *i = new Instance;
       setInstance(e, i);
       auto ps = paramSet(e);
-      updateMatchControls(ps);
       auto savedMatch = state(ps);
-      if (savedMatch.hasHero && savedMatch.hero.chartModel == 1)
-        status(ps, "Passport patch layout was corrected. Recapture the reference and target.");
-      else if (savedMatch.hasTarget &&
-          savedMatch.solution.method == MatchMethod::RadialLegacy)
-        status(ps, "Saved legacy radial fit. Press Apply reference to this clip to use RBF match.");
+      if (savedMatch.hasHero && savedMatch.hero.chartModel == 2)
+        status(ps, "Passport layout restored from main. Recapture the reference and target.");
       std::string name = trimName(gs(ps, "heroName"));
       if (name.empty()) {
         name = suggestReferenceName(i);
@@ -1633,13 +1553,7 @@ OfxStatus mainEntry(const char *action, const void *handle,
     if (!strcmp(action, kOfxImageEffectActionIsIdentity)) {
       auto ps = paramSet(e);
       auto s = state(ps);
-      if (!s.solution.valid || gi(ps, "bypass") ||
-          (s.solution.method == MatchMethod::Rbf
-               ? gd(ps, "biasWeight", 100) == 0
-               : ((s.solution.method == MatchMethod::RadialLegacy
-                       ? gd(ps, "biasWeight", 100) == 0
-                       : gd(ps, "hue") == 0 && gd(ps, "sat") == 0) &&
-                  gd(ps, "exposure") == 0 && gd(ps, "neutral") == 0))) {
+      if (!s.solution.valid || gi(ps, "bypass") || gd(ps, "biasWeight", 100) == 0) {
         prop->propSetString(out, kOfxPropName, 0,
                             kOfxImageEffectSimpleSourceClipName);
         return kOfxStatOK;
@@ -1652,7 +1566,7 @@ OfxStatus mainEntry(const char *action, const void *handle,
   }
 }
 void setHost(OfxHost *h) { host = h; }
-OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 16, setHost, mainEntry};
+OfxPlugin plugin = {kOfxImageEffectPluginApi, 1, id, 0, 19, setHost, mainEntry};
 } // namespace
 extern "C" {
 OfxExport int OfxGetNumberOfPlugins() { return 1; }

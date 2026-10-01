@@ -25,24 +25,8 @@ int main(int argc, char **argv) {
     auto *output = static_cast<float *>(dst.contents);
     Solution solution;
     solution.valid = true;
-    solution.stops = .6;
-    solution.neutralLog = {.08, -.03, -.05};
-    solution.hue = {.03, .015, -.02};
-    solution.sat = {.08, -.02, .03};
-    Amounts amount{.7, .8, .5, .9, false};
+    Amounts amount;
     MetalParams p{};
-    for (int j = 0; j < 3; ++j) {
-      p.hue[j] = float(solution.hue[j]);
-      p.sat[j] = float(solution.sat[j]);
-    }
-    p.neutral[0] = float(solution.neutralLog.r);
-    p.neutral[1] = float(solution.neutralLog.g);
-    p.neutral[2] = float(solution.neutralLog.b);
-    p.stops = float(solution.stops);
-    p.hueAmount = float(amount.hue);
-    p.satAmount = float(amount.sat);
-    p.exposureAmount = float(amount.exposure);
-    p.neutralAmount = float(amount.neutral);
     p.srcW = p.dstW = p.winW = width;
     p.srcH = p.dstH = p.winH = height;
     p.srcRowFloats = p.dstRowFloats = width * 4;
@@ -56,47 +40,8 @@ int main(int argc, char **argv) {
         input[i + 3] = .5f;
         output[i] = output[i + 1] = output[i + 2] = output[i + 3] = -5.f;
       }
-    assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
-                       (__bridge void *)dst, p));
-    id<MTLCommandBuffer> fence = [queue commandBuffer];
-    [fence commit];
-    [fence waitUntilCompleted];
-    assert(fence.status == MTLCommandBufferStatusCompleted);
+    id<MTLCommandBuffer> fence;
     double maxError = 0;
-    for (int i = 0; i < count; i += 4) {
-      RGB expected = transform({input[i], input[i + 1], input[i + 2]},
-                               solution, amount);
-      maxError = std::max({maxError, std::abs(output[i] - expected.r),
-                           std::abs(output[i + 1] - expected.g),
-                           std::abs(output[i + 2] - expected.b)});
-      assert(output[i + 3] == .5f);
-    }
-    assert(maxError < .003);
-    solution.method = MatchMethod::RadialLegacy;
-    solution.radialCount = 1;
-    solution.radial[0] = {.15, .12, .12, .2, 1};
-    auto lut = makeRadialLut(solution);
-    p.method = 1;
-    p.biasWeight = 1.4f;
-    amount.biasWeight = 1.4;
-    assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
-                       (__bridge void *)dst, p, &lut));
-    fence = [queue commandBuffer];
-    [fence commit];
-    [fence waitUntilCompleted];
-    assert(fence.status == MTLCommandBufferStatusCompleted);
-    maxError = 0;
-    for (int i = 0; i < count; i += 4) {
-      RGB expected = transform({input[i], input[i + 1], input[i + 2]},
-                               solution, amount, &lut);
-      maxError = std::max({maxError, std::abs(output[i] - expected.r),
-                           std::abs(output[i + 1] - expected.g),
-                           std::abs(output[i + 2] - expected.b)});
-    }
-    assert(maxError < .003);
-    solution = {};
-    solution.valid = true;
-    solution.method = MatchMethod::Rbf;
     solution.rbfCount = 25;
     solution.rbfSupport = .1;
     for (int j = 0; j < solution.rbfCount; ++j) {
@@ -131,7 +76,7 @@ int main(int argc, char **argv) {
         input[i + 1] = float(encodeIntermediate(.5));
         input[i + 2] = float(encodeIntermediate(.5));
       }
-    p.method = 2;
+    p.satAmount = p.exposureAmount = 1.f;
     p.biasWeight = 1.2f;
     amount.biasWeight = 1.2;
     assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
@@ -181,6 +126,33 @@ int main(int argc, char **argv) {
       assert(output[i + 3] == .5f);
     }
     assert(maxError < 2e-6);
+    // Independently controlled RBF components must agree with the CPU across
+    // dense signed/HDR ramps and the near-neutral saturation fade.
+    for (float weight : {0.f, .5f, 1.f, 2.f})
+    for (float saturation : {0.f, .5f, 1.f})
+      for (float exposure : {0.f, .5f, 1.f}) {
+        p.biasWeight = weight;
+        amount.biasWeight = weight;
+        p.satAmount = saturation;
+        p.exposureAmount = exposure;
+        amount.rbfSat = saturation;
+        amount.rbfExposure = exposure;
+        assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
+                           (__bridge void *)dst, p));
+        fence = [queue commandBuffer];
+        [fence commit]; [fence waitUntilCompleted];
+        assert(fence.status == MTLCommandBufferStatusCompleted);
+        maxError = 0;
+        for (int i = 0; i < count; i += 4) {
+          RGB expected = transform({input[i],input[i+1],input[i+2]}, solution, amount);
+          maxError = std::max({maxError,std::abs(output[i]-expected.r),
+                              std::abs(output[i+1]-expected.g),std::abs(output[i+2]-expected.b)});
+          assert(output[i+3] == input[i+3]);
+        }
+        assert(maxError < 2e-5);
+      }
+    p.satAmount = p.exposureAmount = 1.f;
+    amount.rbfSat = amount.rbfExposure = 1.;
     p.exactCopy = 1;
     assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
                        (__bridge void *)dst, p));
@@ -213,16 +185,20 @@ int main(int argc, char **argv) {
       assert(renderMetal((__bridge void *)queue, (__bridge void *)benchSrc,
                          (__bridge void *)benchDst, p));
       finish();
-      auto start = std::chrono::steady_clock::now();
-      for (int frame = 0; frame < frames; ++frame)
-        assert(renderMetal((__bridge void *)queue, (__bridge void *)benchSrc,
-                           (__bridge void *)benchDst, p));
-      finish();
-      double ms = std::chrono::duration<double, std::milli>(
-          std::chrono::steady_clock::now() - start).count() / frames;
-      std::cout << [device.name UTF8String] << ": 4K RGBA float, "
-                << p.rbfCount << " full Gaussian centers, " << ms
-                << " ms/frame, " << 1000 / ms << " frames/s (isolated Metal batch)\n";
+      for (float dial : {1.f, .5f}) {
+        p.satAmount = p.exposureAmount = dial;
+        auto start = std::chrono::steady_clock::now();
+        for (int frame = 0; frame < frames; ++frame)
+          assert(renderMetal((__bridge void *)queue, (__bridge void *)benchSrc,
+                             (__bridge void *)benchDst, p));
+        finish();
+        double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count() / frames;
+        std::cout << [device.name UTF8String] << ": 4K RGBA float, "
+                  << p.rbfCount << " full Gaussian centers, saturation/exposure "
+                  << dial * 100 << "%, " << ms << " ms/frame, " << 1000 / ms
+                  << " frames/s (isolated Metal batch)\n";
+      }
       [benchSrc release]; [benchDst release];
     }
   }

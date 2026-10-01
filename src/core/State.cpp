@@ -72,25 +72,12 @@ static bool readCapture(std::istream &i, Capture &c) {
 }
 std::string serialize(const Persistent &s) {
   std::ostringstream o;
-  o << std::setprecision(17) << "CM6 " << s.hasHero << ' ' << s.hasTarget
-    << ' ';
+  o << std::setprecision(17) << "CM7 " << s.hasHero << ' ' << s.hasTarget << ' ';
   writeCapture(o, s.hero);
   writeCapture(o, s.target);
-  auto x = s.solution;
-  o << x.valid << ' ' << x.stops << ' ' << x.neutralLog.r << ' '
-    << x.neutralLog.g << ' ' << x.neutralLog.b << ' ';
-  for (double v : x.hue)
-    o << v << ' ';
-  for (double v : x.sat)
-    o << v << ' ';
-  o << x.neutralCount << ' ' << x.colorCount << ' ' << x.exposureMAD << ' '
-    << int(x.method) << ' ' << x.radialCount;
-  for (int j = 0; j < x.radialCount; ++j) {
-    auto a = x.radial[j];
-    o << ' ' << a.x << ' ' << a.y << ' ' << a.hue << ' ' << a.saturation
-      << ' ' << a.weight;
-  }
-  o << ' ' << x.rbfCount << ' ' << x.rbfSupport;
+  const auto &x = s.solution;
+  o << x.valid << ' ' << x.neutralCount << ' ' << x.colorCount
+    << ' ' << x.rbfCount << ' ' << x.rbfSupport;
   for (int j = 0; j < x.rbfCount; ++j) {
     auto c = x.rbfCenters[j], w = x.rbfWeights[j];
     o << ' ' << c.r << ' ' << c.g << ' ' << c.b << ' ' << w.r << ' ' << w.g
@@ -122,61 +109,51 @@ bool deserialize(const std::string &str, Persistent &out) {
   Persistent s;
   int hero = 0, target = 0, valid = 0;
   if (!(i >> tag >> hero >> target) ||
-      (tag != "CM2" && tag != "CM3" && tag != "CM4" && tag != "CM5" && tag != "CM6") ||
-      hero < 0 || hero > 1 ||
-      target < 0 || target > 1 || !readCapture(i, s.hero) ||
-      !readCapture(i, s.target))
+      (tag != "CM2" && tag != "CM3" && tag != "CM4" && tag != "CM5" &&
+       tag != "CM6" && tag != "CM7") || hero < 0 || hero > 1 ||
+      target < 0 || target > 1 || !readCapture(i, s.hero) || !readCapture(i, s.target))
     return false;
   auto &x = s.solution;
-  if (!(i >> valid >> x.stops >> x.neutralLog.r >> x.neutralLog.g >>
-        x.neutralLog.b))
+  if (!(i >> valid) || valid < 0 || valid > 1)
     return false;
-  for (double &v : x.hue)
-    if (!(i >> v))
+  int oldKind = 2;
+  if (tag != "CM7") {
+    // Read obsolete serialized fields solely for payload compatibility.
+    // No obsolete model coefficients enter the runtime solution.
+    double discarded = 0;
+    for (int j = 0; j < 10; ++j)
+      if (!(i >> discarded) || !std::isfinite(discarded)) return false;
+    if (!(i >> x.neutralCount >> x.colorCount >> discarded) || !std::isfinite(discarded))
       return false;
-  for (double &v : x.sat)
-    if (!(i >> v))
-      return false;
-  if (!(i >> x.neutralCount >> x.colorCount >> x.exposureMAD))
-    return false;
-  if (tag == "CM3" || tag == "CM4" || tag == "CM5" || tag == "CM6") {
-    int method = 0;
-    if (!(i >> method >> x.radialCount) || method < 0 ||
-        method > ((tag == "CM4" || tag == "CM5" || tag == "CM6") ? 2 : 1) ||
-        x.radialCount < 0 || x.radialCount > int(x.radial.size()))
-      return false;
-    x.method = MatchMethod(method);
-    for (int j = 0; j < x.radialCount; ++j) {
-      auto &a = x.radial[j];
-      if (!(i >> a.x >> a.y >> a.hue >> a.saturation >> a.weight) ||
-          !std::isfinite(a.x) || !std::isfinite(a.y) ||
-          !std::isfinite(a.hue) || !std::isfinite(a.saturation) ||
-          !std::isfinite(a.weight) || a.weight < 0 || a.weight > 1)
+    oldKind = 0;
+    if (tag != "CM2") {
+      int count = 0;
+      if (!(i >> oldKind >> count) || oldKind < 0 ||
+          oldKind > (tag == "CM3" ? 1 : 2) || count < 0 || count > 32)
         return false;
+      for (int j = 0; j < count * 5; ++j)
+        if (!(i >> discarded) || !std::isfinite(discarded)) return false;
     }
+  } else if (!(i >> x.neutralCount >> x.colorCount)) {
+    return false;
   }
-  if (tag == "CM4" || tag == "CM5" || tag == "CM6") {
+  if (tag != "CM2" && tag != "CM3") {
     if (!(i >> x.rbfCount >> x.rbfSupport) || x.rbfCount < 0 ||
-        x.rbfCount > int(x.rbfCenters.size()) ||
-        !std::isfinite(x.rbfSupport))
+        x.rbfCount > int(x.rbfCenters.size()) || !std::isfinite(x.rbfSupport))
       return false;
     for (int j = 0; j < x.rbfCount; ++j) {
       auto &c = x.rbfCenters[j], &w = x.rbfWeights[j];
-      if (!(i >> c.r >> c.g >> c.b >> w.r >> w.g >> w.b) ||
-          !finite(c) || !finite(w))
+      if (!(i >> c.r >> c.g >> c.b >> w.r >> w.g >> w.b) || !finite(c) || !finite(w))
         return false;
     }
     for (auto &v : x.rbfAffine)
-      if (!(i >> v.r >> v.g >> v.b) || !finite(v))
-        return false;
-    if (x.method == MatchMethod::Rbf &&
-        (x.rbfCount < 7 || x.rbfSupport <= 0))
+      if (!(i >> v.r >> v.g >> v.b) || !finite(v)) return false;
+    if (oldKind == 2 && valid && (x.rbfCount < 7 || x.rbfSupport <= 0))
       return false;
   }
-  if (tag == "CM6") {
+  if (tag == "CM6" || tag == "CM7") {
     int space = 0;
-    if (!(i >> space) || space < 0 || space > 1)
-      return false;
+    if (!(i >> space) || space < 0 || space > 1) return false;
     x.rbfSpace = RbfSpace(space);
   }
   std::string extra;
@@ -185,22 +162,13 @@ bool deserialize(const std::string &str, Persistent &out) {
   s.hasHero = hero;
   s.hasTarget = target;
   x.valid = valid;
-  if ((!s.hasHero && s.hasTarget) || (x.valid && !s.hasTarget) ||
-      !std::isfinite(x.stops) || !finite(x.neutralLog))
+  if ((!s.hasHero && s.hasTarget) || (x.valid && !s.hasTarget))
     return false;
-  for (double v : x.hue)
-    if (!std::isfinite(v))
-      return false;
-  for (double v : x.sat)
-    if (!std::isfinite(v))
-      return false;
-  if (tag == "CM4" && x.method == MatchMethod::Rbf && s.hasTarget) {
-    auto migrated = solve(s.hero, s.target, s.target.geometry,
-                          MatchMethod::Rbf);
-    if (migrated.solution.valid)
-      x = migrated.solution;
-    else
-      x.valid = false;
+  if (s.hasTarget && ((tag == "CM4" && oldKind == 2) || (oldKind != 2 && valid))) {
+    // Older non-RBF nodes reuse their captures to obtain the sole supported fit.
+    // CM4 keeps its existing refit-on-load behavior. CM5/CM6 RBF stays frozen.
+    auto migrated = solve(s.hero, s.target, s.target.geometry);
+    x = migrated.solution;
   }
   out = s;
   return true;

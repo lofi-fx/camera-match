@@ -6,57 +6,6 @@ namespace cm {
 static double clamp(double x, double a, double b) {
   return std::max(a, std::min(b, x));
 }
-static double median(std::vector<double> v) {
-  if (v.empty())
-    return 0;
-  std::sort(v.begin(), v.end());
-  size_t n = v.size();
-  return n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) * .5;
-}
-static RGB neutral(RGB x, RGB logs, double amount) {
-  double y = luminance(x);
-  if (y <= 1e-7)
-    return x;
-  RGB z{x.r * std::exp(logs.r * amount), x.g * std::exp(logs.g * amount),
-        x.b * std::exp(logs.b * amount)};
-  double zy = luminance(z);
-  return zy > 1e-7 && finite(z) ? z * (y / zy) : x;
-}
-static bool regress(const std::vector<std::array<double, 5>> &rows,
-                    std::array<double, 3> &out) {
-  double a[3][4]{};
-  for (int i = 0; i < 3; i++)
-    a[i][i] = .03;
-  for (auto r : rows)
-    for (int i = 0; i < 3; i++) {
-      a[i][3] += r[4] * r[i] * r[3];
-      for (int j = 0; j < 3; j++)
-        a[i][j] += r[4] * r[i] * r[j];
-    }
-  for (int k = 0; k < 3; k++) {
-    int best = k;
-    for (int i = k + 1; i < 3; i++)
-      if (std::abs(a[i][k]) > std::abs(a[best][k]))
-        best = i;
-    if (std::abs(a[best][k]) < 1e-6)
-      return false;
-    if (best != k)
-      for (int j = k; j < 4; j++)
-        std::swap(a[best][j], a[k][j]);
-    double d = a[k][k];
-    for (int j = k; j < 4; j++)
-      a[k][j] /= d;
-    for (int i = 0; i < 3; i++)
-      if (i != k) {
-        double t = a[i][k];
-        for (int j = k; j < 4; j++)
-          a[i][j] -= t * a[k][j];
-      }
-  }
-  for (int i = 0; i < 3; i++)
-    out[i] = a[i][3];
-  return true;
-}
 static double distance(RGB a, RGB b) {
   return std::sqrt((a.r - b.r) * (a.r - b.r) +
                    (a.g - b.g) * (a.g - b.g) +
@@ -75,7 +24,6 @@ static SolveResult solveRbf(const Capture &hero, const Capture &target,
                             const Geometry &geo) {
   SolveResult result;
   auto &s = result.solution;
-  s.method = MatchMethod::Rbf;
   s.rbfSpace = RbfSpace::Intermediate;
   const auto &patches = layout(geo.model);
   for (size_t j = 0; j < patches.size(); ++j) {
@@ -98,7 +46,7 @@ static SolveResult solveRbf(const Capture &hero, const Capture &target,
     return result;
   }
   // Color Workspace's DWG/DI preset fits encoded RGB, not linear light.
-  // Captures remain linear for compatibility with the other matching methods.
+  // Captures remain scene-linear; encode them into the fitting space here.
   s.rbfCenters[s.rbfCount] = {};
   s.rbfWeights[s.rbfCount] = {};
   ++s.rbfCount;
@@ -169,220 +117,54 @@ static SolveResult solveRbf(const Capture &hero, const Capture &target,
   s.valid = true;
   return result;
 }
-SolveResult solve(const Capture &hero, const Capture &target,
-                  const Geometry &geo, MatchMethod method) {
-  SolveResult result;
-  if (hero.chartModel != target.chartModel || geo.model != hero.chartModel) {
-    result.error = "Hero and target chart models differ";
-    return result;
-  }
-  if (method == MatchMethod::Rbf)
-    return solveRbf(hero, target, geo);
-  auto &p = layout(hero.chartModel);
-  std::vector<double> stops, rr, gg, bb;
-  for (size_t i = 0; i < p.size(); i++) {
-    if (!geo.included[i] || p[i].role != Role::Neutral)
-      continue;
-    auto a = hero.patch[i], b = target.patch[i];
-    if (a.valid < 16 || b.valid < 16)
-      continue;
-    double ya = luminance(a.rgb), yb = luminance(b.rgb);
-    if (ya < .005 || yb < .005)
-      continue;
-    stops.push_back(std::log2(ya / yb));
-    if (a.rgb.r > 1e-5 && a.rgb.g > 1e-5 && a.rgb.b > 1e-5 && b.rgb.r > 1e-5 &&
-        b.rgb.g > 1e-5 && b.rgb.b > 1e-5) {
-      rr.push_back(std::log(a.rgb.r / b.rgb.r));
-      gg.push_back(std::log(a.rgb.g / b.rgb.g));
-      bb.push_back(std::log(a.rgb.b / b.rgb.b));
+SolveResult solve(const Capture &hero, const Capture &target, const Geometry &geo) {
+  if (hero.chartModel != target.chartModel || geo.model != hero.chartModel)
+    return {{}, "Reference and target chart models differ"};
+  return solveRbf(hero, target, geo);
+}
+// Attenuate components of the weighted RBF result, without another fit.
+static RGB rbfAmounts(RGB input, RGB matched, double saturation, double exposure) {
+  saturation = clamp(saturation, 0, 1);
+  exposure = clamp(exposure, 0, 1);
+  if (saturation == 1 && exposure == 1)
+    return matched;
+  RGB source = decode(input), target = decode(matched);
+  double sourceY = luminance(source), targetY = luminance(target);
+  // Relative saturation and exposure ratios have no meaningful definition
+  // for nonpositive luminance. Preserve the signed RBF result there.
+  if (sourceY <= 1e-7 || targetY <= 1e-7)
+    return matched;
+  double desiredY = exposure == 1 ? targetY : exposure == 0 ? sourceY
+      : sourceY * std::exp(std::log(targetY / sourceY) * exposure);
+  RGB result = target;
+  if (saturation < 1) {
+    Lab src = toOklab(source), dst = toOklab(target);
+    double c = std::hypot(dst.a, dst.b);
+    if (src.L > 1e-7 && dst.L > 1e-7 && c > 0) {
+      double relative = c / dst.L;
+      // Fade the direction-dependent operation continuously at neutral,
+      // where hue is undefined, rather than dividing by tiny chroma.
+      double t = clamp(relative / 1e-4, 0, 1);
+      double fade = t * t * (3 - 2 * t);
+      double factor = 1 + (1 - saturation) * fade *
+          (std::hypot(src.a, src.b) / src.L / relative - 1);
+      RGB adjusted = fromOklab({dst.L, dst.a * factor, dst.b * factor});
+      if (finite(adjusted) && luminance(adjusted) > 1e-7)
+        result = adjusted;
     }
   }
-  if (stops.size() < 3) {
-    result.error = "Need at least three usable neutral patches";
-    return result;
-  }
-  auto &s = result.solution;
-  s.method = method;
-  s.stops = clamp(median(stops), -4, 4);
-  s.neutralCount = int(stops.size());
-  std::vector<double> dev;
-  for (double x : stops)
-    dev.push_back(std::abs(x - s.stops));
-  s.exposureMAD = median(dev);
-  if (rr.size() >= 3) {
-    s.neutralLog = {median(rr), median(gg), median(bb)};
-    double common = (s.neutralLog.r + s.neutralLog.g + s.neutralLog.b) / 3;
-    s.neutralLog = s.neutralLog - RGB{common, common, common};
-    s.neutralLog.r = clamp(s.neutralLog.r, -.7, .7);
-    s.neutralLog.g = clamp(s.neutralLog.g, -.7, .7);
-    s.neutralLog.b = clamp(s.neutralLog.b, -.7, .7);
-  }
-  std::vector<std::array<double, 5>> hr, sr;
-  bool sectors[6]{};
-  for (size_t i = 0; i < p.size(); i++) {
-    if (!geo.included[i] ||
-        (p[i].role != Role::Chromatic && p[i].role != Role::Skin))
-      continue;
-    auto a = hero.patch[i], b = target.patch[i];
-    if (a.valid < 16 || b.valid < 16)
-      continue;
-    Lab la = toOklab(a.rgb), lb = toOklab(neutral(b.rgb, s.neutralLog, 1));
-    double ca = std::hypot(la.a, la.b), cb = std::hypot(lb.a, lb.b);
-    if (la.L < .06 || lb.L < .06 || ca / la.L < .025 || cb / lb.L < .025)
-      continue;
-    double h = std::atan2(lb.b, lb.a);
-    sectors[std::min(5, int((h + M_PI) / (2 * M_PI) * 6))] = true;
-    double dh = std::remainder(std::atan2(la.b, la.a) - h, 2 * M_PI),
-           ds = std::log((ca / la.L) / (cb / lb.L));
-    double w = clamp(std::min(a.valid, b.valid) / 100., .2, 1.);
-    if (p[i].role == Role::Skin)
-      w *= .6;
-    if (method == MatchMethod::RadialLegacy && s.radialCount < int(s.radial.size()))
-      s.radial[s.radialCount++] = {lb.a / lb.L, lb.b / lb.L,
-                                   clamp(dh, -M_PI / 6, M_PI / 6),
-                                   clamp(ds, -std::log(2.), std::log(2.)), w};
-    hr.push_back(
-        {1, std::sin(h), std::cos(h), clamp(dh, -M_PI / 6, M_PI / 6), w});
-    sr.push_back({1, std::sin(h), std::cos(h),
-                  clamp(ds, -std::log(2.), std::log(2.)), w});
-  }
-  s.colorCount = int(hr.size());
-  int sectorCount = 0;
-  for (bool v : sectors)
-    sectorCount += v;
-  if (method == MatchMethod::RadialLegacy && hr.size() >= 4 && sectorCount >= 4) {
-    s.valid = true;
-  } else if (method == MatchMethod::Harmonic && hr.size() >= 4 &&
-             sectorCount >= 4 && regress(hr, s.hue) &&
-             regress(sr, s.sat)) {
-    double maxHue = 0, maxDerivative = 0, maxSat = 0;
-    for (int j = 0; j < 360; j++) {
-      double h = -M_PI + 2 * M_PI * j / 360.;
-      maxHue = std::max(maxHue, std::abs(s.hue[0] + s.hue[1] * std::sin(h) +
-                                         s.hue[2] * std::cos(h)));
-      maxDerivative = std::max(maxDerivative, std::abs(s.hue[1] * std::cos(h) -
-                                                       s.hue[2] * std::sin(h)));
-      maxSat = std::max(maxSat, std::abs(s.sat[0] + s.sat[1] * std::sin(h) +
-                                         s.sat[2] * std::cos(h)));
-    }
-    double hs = std::min({1., (M_PI / 6) / std::max(maxHue, 1e-9),
-                          .5 / std::max(maxDerivative, 1e-9)}),
-           ss = std::min(1., std::log(2.) / std::max(maxSat, 1e-9));
-    for (double &v : s.hue)
-      v *= hs;
-    for (double &v : s.sat)
-      v *= ss;
-    s.valid = true;
-  } else {
-    s.radialCount = 0;
-    result.error = "Neutral/exposure match only: need chromatic patches "
-                   "spanning four hue regions";
-  }
-  if (!s.valid)
-    s.valid = true;
-  return result;
+  RGB out = encode(result * (desiredY / luminance(result)));
+  return finite(out) ? out : matched;
 }
-static std::array<double, 2> radialAt(const Solution &s, double x, double y) {
-  double hue = 0, sat = 0, total = .35;
-  for (int j = 0; j < s.radialCount; ++j) {
-    const auto &a = s.radial[j];
-    double distance = std::hypot(x - a.x, y - a.y) / .38;
-    if (distance >= 1)
-      continue;
-    double t = 1 - distance;
-    double w = a.weight * t * t * t * t * (1 + 4 * distance);
-    hue += w * a.hue;
-    sat += w * a.saturation;
-    total += w;
-  }
-  return {hue / total, sat / total};
-}
-RadialLut makeRadialLut(const Solution &s) {
-  RadialLut lut;
-  for (int y = 0; y < radialGridSize; ++y)
-    for (int x = 0; x < radialGridSize; ++x) {
-      auto v = radialAt(s, -1. + 2. * x / (radialGridSize - 1),
-                        -1. + 2. * y / (radialGridSize - 1));
-      int i = (y * radialGridSize + x) * 2;
-      lut.values[i] = float(v[0]);
-      lut.values[i + 1] = float(v[1]);
-    }
-  return lut;
-}
-static std::array<double, 2> sampleRadial(const RadialLut &lut, double x,
-                                          double y) {
-  double gx = clamp((x + 1) * .5 * (radialGridSize - 1), 0,
-                    radialGridSize - 1),
-         gy = clamp((y + 1) * .5 * (radialGridSize - 1), 0,
-                    radialGridSize - 1);
-  int ix = int(gx), iy = int(gy);
-  int jx = std::min(ix + 1, radialGridSize - 1),
-      jy = std::min(iy + 1, radialGridSize - 1);
-  double tx = gx - ix, ty = gy - iy;
-  std::array<double, 2> result{};
-  for (int c = 0; c < 2; ++c) {
-    auto at = [&](int px, int py) {
-      return double(lut.values[(py * radialGridSize + px) * 2 + c]);
-    };
-    result[c] = (1 - ty) * ((1 - tx) * at(ix, iy) + tx * at(jx, iy)) +
-                ty * ((1 - tx) * at(ix, jy) + tx * at(jx, jy));
-  }
-  return result;
-}
-RGB transform(RGB input, const Solution &s, const Amounts &a,
-              const RadialLut *lut) {
-  if (s.method == MatchMethod::Rbf) {
-    if (a.bypass || !s.valid || !finite(input) || a.biasWeight <= 0)
-      return input;
-    const bool di = s.rbfSpace == RbfSpace::Intermediate;
-    RGB x = di ? input : decode(input);
-    RGB matched = evaluateRbf(s, x);
-    RGB out = x + (matched - x) * clamp(a.biasWeight, 0, 2);
-    if (!di)
-      out = encode(out);
-    return finite(out) ? out : input;
-  }
-  if (a.bypass || !s.valid ||
-      (((a.hue == 0 && a.sat == 0) ||
-        (s.method == MatchMethod::RadialLegacy && a.biasWeight == 0)) &&
-       a.exposure == 0 && a.neutral == 0) ||
-      !finite(input))
+RGB transform(RGB input, const Solution &s, const Amounts &a) {
+  if (a.bypass || !s.valid || !finite(input) || a.biasWeight <= 0)
     return input;
-  RGB x = decode(input);
-  double y = luminance(x);
-  if (a.neutral > 0 && y > 1e-7)
-    x = neutral(x, s.neutralLog, clamp(a.neutral, 0, 1));
-  if ((a.hue > 0 || a.sat > 0) &&
-      (s.method != MatchMethod::RadialLegacy || a.biasWeight > 0) && y > 1e-6) {
-    Lab l = toOklab(x);
-    double c = std::hypot(l.a, l.b);
-    if (l.L > 1e-5 && c / l.L > .005) {
-      double h = std::atan2(l.b, l.a),
-             dh = s.hue[0] + s.hue[1] * std::sin(h) + s.hue[2] * std::cos(h),
-             ds = s.sat[0] + s.sat[1] * std::sin(h) + s.sat[2] * std::cos(h);
-      if (s.method == MatchMethod::RadialLegacy) {
-        auto v = lut ? sampleRadial(*lut, l.a / l.L, l.b / l.L)
-                     : radialAt(s, l.a / l.L, l.b / l.L);
-        dh = v[0] * clamp(a.biasWeight, 0, 2);
-        ds = v[1] * clamp(a.biasWeight, 0, 2);
-      }
-      double h2 = h + clamp(a.hue, 0, 1) * clamp(dh, -M_PI / 6, M_PI / 6),
-             c2 = c * std::exp(clamp(a.sat, 0, 1) *
-                               clamp(ds, -std::log(2.), std::log(2.)));
-      RGB z = fromOklab({l.L, c2 * std::cos(h2), c2 * std::sin(h2)});
-      double zy = luminance(z);
-      if (finite(z) && zy > 1e-6) {
-        z = z * (y / zy);
-        double magnitude =
-            std::max({std::abs(z.r), std::abs(z.g), std::abs(z.b)});
-        if (magnitude < 100)
-          x = z;
-      }
-    }
-  }
-  if (a.exposure > 0)
-    x = x * std::exp2(clamp(a.exposure, 0, 1) * s.stops);
-  RGB out = encode(x);
-  return finite(out) ? out : input;
+  const bool di = s.rbfSpace == RbfSpace::Intermediate;
+  RGB x = di ? input : decode(input);
+  RGB matched = evaluateRbf(s, x);
+  RGB out = x + (matched - x) * clamp(a.biasWeight, 0, 2);
+  if (!di)
+    out = encode(out);
+  return finite(out) ? rbfAmounts(input, out, a.rbfSat, a.rbfExposure) : input;
 }
 } // namespace cm
