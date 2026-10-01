@@ -30,9 +30,7 @@ The plugin has **two chart layouts**: full-size Video and Passport Video. Select
 
 ## Download
 
-[Download v0.9 beta (macOS, Apple silicon)](https://github.com/lofi-fx/camera-match/releases/tag/v0.9-beta)
-
-The download includes `LoFiFxCameraMatch.ofx.bundle`. Source builds are also available using the instructions below.
+[Download v0.9 beta (macOS, Apple silicon)](https://github.com/lofi-fx/camera-match/releases/download/v0.9-beta/LoFiFxCameraMatch-macOS-v0.9-beta.zip)
 
 ## Installing the plugin
 
