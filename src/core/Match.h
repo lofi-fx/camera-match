@@ -30,6 +30,7 @@ constexpr int radialGridSize = 64;
 struct RadialLut {
   std::array<float, radialGridSize * radialGridSize * 2> values{};
 };
+enum class RbfSpace { Linear = 0, Intermediate = 1 };
 struct Solution {
   bool valid = false;
   double stops = 0;
@@ -42,6 +43,7 @@ struct Solution {
   std::array<RGB, 4> rbfAffine{};
   int rbfCount = 0;
   double rbfSupport = 0;
+  RbfSpace rbfSpace = RbfSpace::Linear; // CM5 and earlier used linear DWG.
   int neutralCount = 0, colorCount = 0;
   double exposureMAD = 0;
 };

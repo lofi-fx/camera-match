@@ -38,7 +38,7 @@ After reopening Resolve, press **Use this reference for other clips** under **Ad
 
 Changing chart geometry after capture leaves the last correction active. Recapture to use new sample areas. Changing exclusions can be applied with **Refit captured samples** under **Advanced**. Changing Match method refits the two saved captures; playback and rendering never refit. `Bypass` is exact pass-through. Existing nodes saved with the earlier 2D Radial bias method retain their result until they are reapplied or switched between methods.
 
-After updating from version 0.12 to 0.13, **recapture both the reference and target on Passport Video nodes**: the earlier Passport grid measured the wrong physical positions. Saved corrections still render until replaced. For full-size Color Checker Video RBF nodes, press **Refit captured samples** to use the smoother fit and finer lookup grid.
+After updating from version 0.12 to 0.13, **recapture both the reference and target on Passport Video nodes**: the earlier Passport grid measured the wrong physical positions. Saved corrections still render until replaced. For RBF nodes saved in 0.14, install 0.15, restart Resolve, and press **Advanced → Refit captured samples** to use the new native DI fit. Saved captures can be reused. Until refitted, 0.14 nodes retain their linear fit.
 
 See [the algorithm notes](docs/algorithm.md) for the fitted model and limits.
 
@@ -46,4 +46,6 @@ See [the algorithm notes](docs/algorithm.md) for the fitted model and limits.
 
 The code builds and passes the automated checks, including a Metal comparison against the CPU transform. The system-installed plugin has appeared in Resolve's LoFi FX group. The revised inspector groups and labels need direct host verification; capture, node copying, undo, save/reopen, and export need the same. Follow [the host test checklist](docs/host-test-checklist.md) before using the effect in a production project.
 
-Chart patch rectangles were traced from manufacturer imagery and still need alignment validation against physical targets. The manual input-space contract cannot detect an incorrectly normalized upstream clip. The matcher fits a global exposure gain, relative neutral balance, and smooth hue/saturation fields; it does not fit tone curves, gamut compression, or a 3D LUT.
+Chart patch rectangles were traced from manufacturer imagery and still need alignment validation against physical targets. The manual input-space contract cannot detect an incorrectly normalized upstream clip. Existing match fits a global exposure gain, relative neutral balance, and smooth hue/saturation fields. RBF match fits a Gaussian/affine RGB mapping directly in DI and evaluates it on Metal without a LUT or kernel cutoff. Version 0.15 passes CPU/Python and Metal gradient checks; matching quality on the affected footage still needs Resolve verification.
+
+Version 0.16 rejects newly fitted RBF corrections that reverse neutral brightness. If this occurs, check **Rotate chart** and overlay alignment on both clips, then recapture both observations. An upright Passport panel (six columns, four rows, corners placed TL/TR/BR/BL) uses **0 degrees**. A failed fit keeps the previous correction; bypass that correction while correcting capture alignment.

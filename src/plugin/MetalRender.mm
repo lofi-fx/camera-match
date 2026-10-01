@@ -12,6 +12,7 @@ struct Params {
   float4 rbfCenter[32], rbfWeight[32], rbfAffine[4];
   float rbfInvSupportSq;
   int rbfCount;
+  int rbfSpace;
   float stops, hueAmount, satAmount, exposureAmount;
   float neutralAmount;
   float biasWeight;
@@ -72,8 +73,7 @@ float3 rbf(float3 input, constant Params &p) {
   for (int i = 0; i < p.rbfCount; ++i) {
     float3 delta = input - p.rbfCenter[i].xyz;
     float distanceSq = dot(delta, delta) * p.rbfInvSupportSq;
-    if (distanceSq < 16.f)
-      out += p.rbfWeight[i].xyz * exp(-distanceSq);
+    out += p.rbfWeight[i].xyz * exp(-distanceSq);
   }
   return out;
 }
@@ -81,10 +81,10 @@ float3 match(float3 input, constant Params &p, device const float2 *lut) {
   if (!all(isfinite(input))) return input;
   if (p.method == 2) {
     if (p.biasWeight <= 0.f) return input;
-    float3 linear = decodeDI(input);
-    float3 matched = rbf(linear, p);
-    float3 out = encodeDI(linear +
-                          clamp(p.biasWeight,0.f,2.f)*(matched-linear));
+    float3 x = p.rbfSpace == 1 ? input : decodeDI(input);
+    float3 matched = rbf(x, p);
+    float3 out = x + clamp(p.biasWeight,0.f,2.f)*(matched-x);
+    if (p.rbfSpace == 0) out = encodeDI(out);
     return all(isfinite(out)) ? out : input;
   }
   float3 x = decodeDI(input);
@@ -169,8 +169,11 @@ bool renderMetal(void *queuePtr, void *source, void *output,
       std::lock_guard<std::mutex> lock(pipelineMutex);
       if (!pipeline || pipelineDevice != queue.device) {
         NSError *error = nil;
+        MTLCompileOptions *options = [MTLCompileOptions new];
+        options.fastMathEnabled = NO;
         id<MTLLibrary> library = [queue.device newLibraryWithSource:
-            [NSString stringWithUTF8String:shader] options:nil error:&error];
+            [NSString stringWithUTF8String:shader] options:options error:&error];
+        [options release];
         if (!library) {
           NSLog(@"Camera Match Metal library: %@", error);
           return false;

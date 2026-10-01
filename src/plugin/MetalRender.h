@@ -8,6 +8,7 @@ struct alignas(16) MetalParams {
   float rbfCenter[32][4], rbfWeight[32][4], rbfAffine[4][4];
   float rbfInvSupportSq;
   int32_t rbfCount;
+  int32_t rbfSpace;
   float stops, hueAmount, satAmount, exposureAmount;
   float neutralAmount;
   float biasWeight;

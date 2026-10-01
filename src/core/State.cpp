@@ -72,7 +72,7 @@ static bool readCapture(std::istream &i, Capture &c) {
 }
 std::string serialize(const Persistent &s) {
   std::ostringstream o;
-  o << std::setprecision(17) << "CM5 " << s.hasHero << ' ' << s.hasTarget
+  o << std::setprecision(17) << "CM6 " << s.hasHero << ' ' << s.hasTarget
     << ' ';
   writeCapture(o, s.hero);
   writeCapture(o, s.target);
@@ -98,6 +98,7 @@ std::string serialize(const Persistent &s) {
   }
   for (auto v : x.rbfAffine)
     o << ' ' << v.r << ' ' << v.g << ' ' << v.b;
+  o << ' ' << int(x.rbfSpace);
   std::string body = o.str();
   std::ostringstream result;
   result << body << ' ' << hash(body);
@@ -121,7 +122,7 @@ bool deserialize(const std::string &str, Persistent &out) {
   Persistent s;
   int hero = 0, target = 0, valid = 0;
   if (!(i >> tag >> hero >> target) ||
-      (tag != "CM2" && tag != "CM3" && tag != "CM4" && tag != "CM5") ||
+      (tag != "CM2" && tag != "CM3" && tag != "CM4" && tag != "CM5" && tag != "CM6") ||
       hero < 0 || hero > 1 ||
       target < 0 || target > 1 || !readCapture(i, s.hero) ||
       !readCapture(i, s.target))
@@ -138,10 +139,10 @@ bool deserialize(const std::string &str, Persistent &out) {
       return false;
   if (!(i >> x.neutralCount >> x.colorCount >> x.exposureMAD))
     return false;
-  if (tag == "CM3" || tag == "CM4" || tag == "CM5") {
+  if (tag == "CM3" || tag == "CM4" || tag == "CM5" || tag == "CM6") {
     int method = 0;
     if (!(i >> method >> x.radialCount) || method < 0 ||
-        method > ((tag == "CM4" || tag == "CM5") ? 2 : 1) ||
+        method > ((tag == "CM4" || tag == "CM5" || tag == "CM6") ? 2 : 1) ||
         x.radialCount < 0 || x.radialCount > int(x.radial.size()))
       return false;
     x.method = MatchMethod(method);
@@ -154,7 +155,7 @@ bool deserialize(const std::string &str, Persistent &out) {
         return false;
     }
   }
-  if (tag == "CM4" || tag == "CM5") {
+  if (tag == "CM4" || tag == "CM5" || tag == "CM6") {
     if (!(i >> x.rbfCount >> x.rbfSupport) || x.rbfCount < 0 ||
         x.rbfCount > int(x.rbfCenters.size()) ||
         !std::isfinite(x.rbfSupport))
@@ -171,6 +172,12 @@ bool deserialize(const std::string &str, Persistent &out) {
     if (x.method == MatchMethod::Rbf &&
         (x.rbfCount < 7 || x.rbfSupport <= 0))
       return false;
+  }
+  if (tag == "CM6") {
+    int space = 0;
+    if (!(i >> space) || space < 0 || space > 1)
+      return false;
+    x.rbfSpace = RbfSpace(space);
   }
   std::string extra;
   if (i >> extra)

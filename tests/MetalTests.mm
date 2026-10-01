@@ -5,9 +5,12 @@
 #include <cassert>
 #include <cmath>
 #include <memory>
+#include <chrono>
+#include <iostream>
+#include <string>
 
 using namespace cm;
-int main() {
+int main(int argc, char **argv) {
   @autoreleasepool {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     assert(device);
@@ -146,6 +149,38 @@ int main() {
                            std::abs(output[i + 2] - expected.b)});
     }
     assert(maxError < .0005);
+    // Dense DI ramps exercise the native model across shadows, highlights,
+    // negative channels and values above one. Compare every pixel to doubles.
+    solution.rbfSpace = RbfSpace::Intermediate;
+    p.rbfSpace = 1;
+    for (int i = 0; i < count; i += 4) {
+      float v = -.1f + 1.4f * (i / 4) / (width * height - 1);
+      input[i] = v;
+      input[i + 1] = v * .8f;
+      input[i + 2] = v * .6f;
+    }
+    assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
+                       (__bridge void *)dst, p));
+    fence = [queue commandBuffer];
+    [fence commit];
+    [fence waitUntilCompleted];
+    assert(fence.status == MTLCommandBufferStatusCompleted);
+    maxError = 0;
+    for (int i = 0; i < count; i += 4) {
+      RGB expected = transform({input[i], input[i + 1], input[i + 2]}, solution, amount);
+      maxError = std::max({maxError, std::abs(output[i] - expected.r),
+                          std::abs(output[i + 1] - expected.g),
+                          std::abs(output[i + 2] - expected.b)});
+      for (int c = 0; c < 3; ++c) {
+        assert(std::isfinite(output[i + c]));
+        if (i) {
+          assert(output[i + c] > output[i - 4 + c]);
+          assert(output[i + c] - output[i - 4 + c] < .0002f);
+        }
+      }
+      assert(output[i + 3] == .5f);
+    }
+    assert(maxError < 2e-6);
     p.exactCopy = 1;
     assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
                        (__bridge void *)dst, p));
@@ -154,5 +189,41 @@ int main() {
     [fence waitUntilCompleted];
     for (int i = 0; i < count; ++i)
       assert(output[i] == input[i]);
+    if (argc > 1 && std::string(argv[1]) == "--benchmark") {
+      constexpr int bw = 3840, bh = 2160, frames = 30;
+      constexpr size_t bytes = size_t(bw) * bh * 4 * sizeof(float);
+      id<MTLBuffer> benchSrc = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+      id<MTLBuffer> benchDst = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+      assert(benchSrc && benchDst);
+      float *pixels = static_cast<float *>(benchSrc.contents);
+      for (size_t i = 0; i < bytes / sizeof(float); i += 4) {
+        float v = float(i / 4 % bw) / bw;
+        pixels[i] = v; pixels[i + 1] = v * .8f;
+        pixels[i + 2] = v * .6f; pixels[i + 3] = 1;
+      }
+      p.exactCopy = 0;
+      p.srcW = p.dstW = p.winW = bw;
+      p.srcH = p.dstH = p.winH = bh;
+      p.srcRowFloats = p.dstRowFloats = bw * 4;
+      auto finish = [&]() {
+        id<MTLCommandBuffer> done = [queue commandBuffer];
+        [done commit]; [done waitUntilCompleted];
+        assert(done.status == MTLCommandBufferStatusCompleted);
+      };
+      assert(renderMetal((__bridge void *)queue, (__bridge void *)benchSrc,
+                         (__bridge void *)benchDst, p));
+      finish();
+      auto start = std::chrono::steady_clock::now();
+      for (int frame = 0; frame < frames; ++frame)
+        assert(renderMetal((__bridge void *)queue, (__bridge void *)benchSrc,
+                           (__bridge void *)benchDst, p));
+      finish();
+      double ms = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - start).count() / frames;
+      std::cout << [device.name UTF8String] << ": 4K RGBA float, "
+                << p.rbfCount << " full Gaussian centers, " << ms
+                << " ms/frame, " << 1000 / ms << " frames/s (isolated Metal batch)\n";
+      [benchSrc release]; [benchDst release];
+    }
   }
 }

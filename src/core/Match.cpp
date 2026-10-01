@@ -76,12 +76,13 @@ static SolveResult solveRbf(const Capture &hero, const Capture &target,
   SolveResult result;
   auto &s = result.solution;
   s.method = MatchMethod::Rbf;
+  s.rbfSpace = RbfSpace::Intermediate;
   const auto &patches = layout(geo.model);
   for (size_t j = 0; j < patches.size(); ++j) {
     if (!geo.included[j] || hero.patch[j].valid < 16 ||
         target.patch[j].valid < 16)
       continue;
-    RGB a = target.patch[j].rgb, b = hero.patch[j].rgb;
+    RGB a = encode(target.patch[j].rgb), b = encode(hero.patch[j].rgb);
     if (!finite(a) || !finite(b))
       continue;
     int index = s.rbfCount++;
@@ -96,7 +97,8 @@ static SolveResult solveRbf(const Capture &hero, const Capture &target,
     result.error = "RBF needs at least seven usable chart patches";
     return result;
   }
-  // Match Color Workspace's linear DWG preset with a pinned black anchor.
+  // Color Workspace's DWG/DI preset fits encoded RGB, not linear light.
+  // Captures remain linear for compatibility with the other matching methods.
   s.rbfCenters[s.rbfCount] = {};
   s.rbfWeights[s.rbfCount] = {};
   ++s.rbfCount;
@@ -118,8 +120,6 @@ static SolveResult solveRbf(const Capture &hero, const Capture &target,
     a[i][size + 1] = y.g;
     a[i][size + 2] = y.b;
   }
-  for (int j = 0; j < 4; ++j)
-    a[n + j][n + j] = -1e-7;
   for (int col = 0; col < size; ++col) {
     int pivot = col;
     for (int row = col + 1; row < size; ++row)
@@ -146,6 +146,26 @@ static SolveResult solveRbf(const Capture &hero, const Capture &target,
   for (int i = 0; i < 4; ++i)
     s.rbfAffine[i] = {a[n + i][size], a[n + i][size + 1],
                       a[n + i][size + 2]};
+  // Sparse or mismatched patches can fit a smooth function that folds in
+  // shadows. Check actual scene-linear brightness along an encoded neutral
+  // ramp before accepting it. This is a fit-time check, never a render clamp.
+  double upper = 1.;
+  for (int i = 0; i < n; ++i)
+    upper = std::max({upper, s.rbfCenters[i].r, s.rbfCenters[i].g,
+                     s.rbfCenters[i].b});
+  double previous = luminance(decode(evaluateRbf(s, {})));
+  for (int i = 1; i <= 4096; ++i) {
+    double v = upper * i / 4096.;
+    RGB mapped = decode(evaluateRbf(s, {v, v, v}));
+    double y = luminance(mapped);
+    if (!finite(mapped) || !std::isfinite(y) || y < previous - 1e-9) {
+      result.error = "RBF rejected: shadow/highlight brightness reverses. "
+                     "Check Rotate chart and sample alignment on both clips, "
+                     "then recapture the reference and target. Previous correction kept.";
+      return result;
+    }
+    previous = y;
+  }
   s.valid = true;
   return result;
 }
@@ -314,10 +334,12 @@ RGB transform(RGB input, const Solution &s, const Amounts &a,
   if (s.method == MatchMethod::Rbf) {
     if (a.bypass || !s.valid || !finite(input) || a.biasWeight <= 0)
       return input;
-    RGB linear = decode(input);
-    RGB matched = evaluateRbf(s, linear);
-    RGB out = encode(linear + (matched - linear) *
-                                 clamp(a.biasWeight, 0, 2));
+    const bool di = s.rbfSpace == RbfSpace::Intermediate;
+    RGB x = di ? input : decode(input);
+    RGB matched = evaluateRbf(s, x);
+    RGB out = x + (matched - x) * clamp(a.biasWeight, 0, 2);
+    if (!di)
+      out = encode(out);
     return finite(out) ? out : input;
   }
   if (a.bypass || !s.valid ||
