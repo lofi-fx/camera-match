@@ -1,6 +1,7 @@
 #import <Metal/Metal.h>
 #include "Match.h"
 #include "MetalRender.h"
+#include "fixtures/HighlightFit.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -153,6 +154,50 @@ int main(int argc, char **argv) {
       }
     p.satAmount = p.exposureAmount = 1.f;
     amount.rbfSat = amount.rbfExposure = 1.;
+    const MetalParams benchmarkParams = p;
+    // Exercise the exact real-world fit at full strength, beyond chart range,
+    // across colored highlights and fine neutral steps.
+    solution = capturedHighlightFit();
+    p.rbfCount = solution.rbfCount;
+    p.rbfSpace = 1;
+    p.rbfInvSupportSq = 100.f;
+    for (int j = 0; j < solution.rbfCount; ++j) {
+      auto c = solution.rbfCenters[j], w = solution.rbfWeights[j];
+      p.rbfCenter[j][0]=float(c.r); p.rbfCenter[j][1]=float(c.g); p.rbfCenter[j][2]=float(c.b);
+      p.rbfWeight[j][0]=float(w.r); p.rbfWeight[j][1]=float(w.g); p.rbfWeight[j][2]=float(w.b);
+    }
+    for (int j = 0; j < 4; ++j) {
+      auto a = solution.rbfAffine[j];
+      p.rbfAffine[j][0]=float(a.r); p.rbfAffine[j][1]=float(a.g); p.rbfAffine[j][2]=float(a.b);
+    }
+    amount = Amounts{};
+    p.biasWeight = 1.f;
+    p.satAmount = p.exposureAmount = 1.f;
+    for (int i = 0; i < count; i += 4) {
+      int pixel = i / 4;
+      if (pixel < width*height/2) {
+        float v = .35f + .65f * pixel / (width*height/2-1);
+        input[i]=input[i+1]=input[i+2]=v;
+      } else {
+        input[i] = .35f + .65f * (pixel % 20) / 19.f;
+        input[i+1] = .35f + .65f * ((pixel/20)%20) / 19.f;
+        input[i+2] = .35f + .65f * ((pixel/400)%20) / 19.f;
+      }
+    }
+    assert(renderMetal((__bridge void *)queue, (__bridge void *)src, (__bridge void *)dst, p));
+    fence = [queue commandBuffer]; [fence commit]; [fence waitUntilCompleted];
+    assert(fence.status == MTLCommandBufferStatusCompleted);
+    maxError = 0;
+    for (int i = 0; i < count; i += 4) {
+      RGB expected = transform({input[i],input[i+1],input[i+2]}, solution, amount);
+      maxError = std::max({maxError,std::abs(output[i]-expected.r),
+                          std::abs(output[i+1]-expected.g),std::abs(output[i+2]-expected.b)});
+      if (i > 0 && i < count/2)
+        for (int channel=0; channel<3; ++channel)
+          assert(output[i+channel] > output[i-4+channel]);
+    }
+    assert(maxError < 2e-6);
+    std::cout << "Captured highlight fit Metal/CPU max DI error: " << maxError << "\n";
     p.exactCopy = 1;
     assert(renderMetal((__bridge void *)queue, (__bridge void *)src,
                        (__bridge void *)dst, p));
@@ -162,6 +207,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < count; ++i)
       assert(output[i] == input[i]);
     if (argc > 1 && std::string(argv[1]) == "--benchmark") {
+      p = benchmarkParams;
       constexpr int bw = 3840, bh = 2160, frames = 30;
       constexpr size_t bytes = size_t(bw) * bh * 4 * sizeof(float);
       id<MTLBuffer> benchSrc = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];

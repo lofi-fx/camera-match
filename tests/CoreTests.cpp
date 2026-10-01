@@ -5,6 +5,7 @@
 #include "Match.h"
 #include "PatchSampler.h"
 #include "State.h"
+#include "fixtures/HighlightFit.h"
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -439,5 +440,28 @@ int main() {
   auto folding = solve(foldingHero, foldingTarget, foldingGeometry);
   assert(!folding.solution.valid);
   assert(folding.error.find("brightness reverses") != std::string::npos);
+  // Real highlight fit: both full controls must equal the frozen model, and
+  // exposure zero must preserve input luminance for positive colored highlights.
+  auto highlight = capturedHighlightFit();
+  const RGB highlightInputs[] = {{.5,.5,.5},{1,1,1},{4,4,4},{20,20,20},{2,1,.5},{.5,1,2}};
+  const RGB highlightGolden[] = {
+    {.40216367589187696,.40752365669657276,.4094392051352691},
+    {.46518930369643097,.47269937014928753,.47477720306632765},
+    {.57281009095057267,.58728589514702756,.58530279710718502},
+    {.72552414598390991,.74312770276003692,.74061165803660922},
+    {.53914637916597108,.47163736846247084,.3890664522748854},
+    {.3607218563533216,.44789085337965512,.52997844796845095}
+  };
+  for (int j = 0; j < 6; ++j) {
+    RGB in = encode(highlightInputs[j]);
+    RGB out = transform(in, highlight, Amounts{});
+    assert(std::abs(out.r-highlightGolden[j].r) < 1e-12);
+    assert(std::abs(out.g-highlightGolden[j].g) < 1e-12);
+    assert(std::abs(out.b-highlightGolden[j].b) < 1e-12);
+    Amounts preserveExposure;
+    preserveExposure.rbfExposure = 0;
+    RGB preserved = decode(transform(in, highlight, preserveExposure));
+    assert(std::abs(luminance(preserved)-luminance(highlightInputs[j])) < 1e-9);
+  }
   std::cout << "core checks passed\n";
 }
