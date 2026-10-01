@@ -1320,7 +1320,7 @@ OfxStatus changed(OfxImageEffectHandle e, OfxPropertySetHandle args) {
 }
 OfxStatus describe(OfxImageEffectHandle e) {
   auto p = effectProps(e);
-  prop->propSetString(p, kOfxPropLabel, 0, "Camera Match");
+  prop->propSetString(p, kOfxPropLabel, 0, "LoFi FX Camera Match");
   prop->propSetString(p, kOfxImageEffectPluginPropGrouping, 0, "LoFi FX");
   prop->propSetString(p, kOfxImageEffectPropSupportedContexts, 0,
                       kOfxImageEffectContextFilter);
